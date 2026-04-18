@@ -1,0 +1,11 @@
+{
+  "token": "YOUR_DISCORD_BOT_TOKEN",
+  "voiceServicePort": 5000,
+  "restrictedImageFolder": "./restricted_images",
+  "restrictedWordsFile": "./words/restrictedword.txt",
+  "muteDurations": {
+    "warn": 30,
+    "timeout": 60
+  },
+  "startPythonVoiceService": true
+}
