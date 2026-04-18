@@ -6,3 +6,4 @@ config.json
 models/
 *.log
 .DS_Store
+TraderBOT.zip
