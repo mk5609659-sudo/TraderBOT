@@ -185,27 +185,75 @@ async function handleImageAttachments(message, attachments, linkDetected) {
 }
 
 async function detectUrlRegionsInImage(buffer) {
-  const urlPattern = /https?:\/\/|www\.|\.com|\.net|\.org|\.io|\.co|\.me|\.ly|\.gg/i;
+  const urlWordPattern = /https?:|www\.|\/\/|\.(com|net|org|io|co|me|ly|gg|uk|de|fr|ru|jp)\b/i;
   let worker;
   try {
-    worker = await createWorker('eng');
-    const { data } = await worker.recognize(buffer);
-    const regions = [];
+    const meta = await sharp(buffer).metadata();
+    const targetWidth = Math.max(meta.width, 1200);
+    const scale = meta.width / targetWidth;
 
-    for (const line of data.lines || []) {
-      const lineText = line.words.map((w) => w.text).join(' ');
-      if (urlPattern.test(lineText)) {
-        const bbox = line.bbox;
-        const pad = 6;
-        regions.push({
-          left: Math.max(0, bbox.x0 - pad),
-          top: Math.max(0, bbox.y0 - pad),
-          width: Math.max(1, bbox.x1 - bbox.x0 + pad * 2),
-          height: Math.max(1, bbox.y1 - bbox.y0 + pad * 2)
-        });
-      }
+    const processBuffer = await sharp(buffer)
+      .resize({ width: targetWidth, kernel: sharp.kernel.lanczos3 })
+      .png()
+      .toBuffer();
+
+    worker = await createWorker('eng');
+    await worker.setParameters({ tessedit_pageseg_mode: 11 });
+    const { data } = await worker.recognize(processBuffer, {}, { tsv: true, text: true });
+
+    console.log(`[OCR] Detected text: "${(data.text || '').replace(/\n/g, ' ').slice(0, 300)}"`);
+
+    const tsvLines = (data.tsv || '').split('\n').slice(1);
+    const tsvWords = [];
+    for (const line of tsvLines) {
+      const parts = line.split('\t');
+      if (parts.length < 12) continue;
+      const level = parseInt(parts[0]);
+      if (level !== 5) continue;
+      const left = parseInt(parts[6]);
+      const top = parseInt(parts[7]);
+      const width = parseInt(parts[8]);
+      const height = parseInt(parts[9]);
+      const text = parts.slice(11).join('\t').trim();
+      if (!text) continue;
+      tsvWords.push({ text, left, top, width, height });
     }
 
+    const regions = [];
+    let urlGroup = [];
+
+    const flushGroup = () => {
+      if (urlGroup.length === 0) return;
+      const x0 = Math.min(...urlGroup.map((w) => w.left));
+      const y0 = Math.min(...urlGroup.map((w) => w.top));
+      const x1 = Math.max(...urlGroup.map((w) => w.left + w.width));
+      const y1 = Math.max(...urlGroup.map((w) => w.top + w.height));
+      const pad = 10;
+      regions.push({
+        left: Math.max(0, Math.round(x0 * scale) - pad),
+        top: Math.max(0, Math.round(y0 * scale) - pad),
+        width: Math.max(1, Math.round((x1 - x0) * scale) + pad * 2),
+        height: Math.max(1, Math.round((y1 - y0) * scale) + pad * 2)
+      });
+      urlGroup = [];
+    };
+
+    for (const word of tsvWords) {
+      if (urlWordPattern.test(word.text)) {
+        urlGroup.push(word);
+      } else {
+        const prev = urlGroup[urlGroup.length - 1];
+        const sameRow = prev && Math.abs(word.top - prev.top) < 20 && word.left - (prev.left + prev.width) < 100;
+        if (urlGroup.length > 0 && sameRow) {
+          urlGroup.push(word);
+        } else {
+          flushGroup();
+        }
+      }
+    }
+    flushGroup();
+
+    console.log(`[OCR] Found ${regions.length} URL region(s) in image.`);
     return regions;
   } catch (err) {
     console.warn('OCR failed, skipping URL region detection:', err.message);
