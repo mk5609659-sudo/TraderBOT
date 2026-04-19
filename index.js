@@ -4,6 +4,7 @@ const { Readable } = require('stream');
 const prism = require('prism-media');
 const axios = require('axios');
 const sharp = require('sharp');
+const { createWorker } = require('tesseract.js');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
@@ -159,6 +160,18 @@ async function handleImageAttachments(message, attachments, linkDetected) {
       return;
     }
 
+    const urlRegions = await detectUrlRegionsInImage(buffer);
+    if (urlRegions.length > 0) {
+      console.log(`Detected ${urlRegions.length} URL region(s) in image from ${message.author.tag} — blurring only those areas.`);
+      const blurred = await blurRegionsInImage(buffer, urlRegions);
+      await safeDelete(message, `<@${message.author.id}> Your image contained a visible link. Only the link area has been blurred.`);
+      await message.channel.send({
+        content: `<@${message.author.id}> Here is your image with the link area blurred.`,
+        files: [{ attachment: blurred, name: 'blurred.png' }]
+      });
+      return;
+    }
+
     if (linkDetected) {
       const blurred = await blurImage(buffer);
       await safeDelete(message, `<@${message.author.id}> Image with link was blurred and reposted.`);
@@ -169,6 +182,61 @@ async function handleImageAttachments(message, attachments, linkDetected) {
       return;
     }
   }
+}
+
+async function detectUrlRegionsInImage(buffer) {
+  const urlPattern = /https?:\/\/|www\.|\.com|\.net|\.org|\.io|\.co|\.me|\.ly|\.gg/i;
+  let worker;
+  try {
+    worker = await createWorker('eng');
+    const { data } = await worker.recognize(buffer);
+    const regions = [];
+
+    for (const line of data.lines || []) {
+      const lineText = line.words.map((w) => w.text).join(' ');
+      if (urlPattern.test(lineText)) {
+        const bbox = line.bbox;
+        const pad = 6;
+        regions.push({
+          left: Math.max(0, bbox.x0 - pad),
+          top: Math.max(0, bbox.y0 - pad),
+          width: Math.max(1, bbox.x1 - bbox.x0 + pad * 2),
+          height: Math.max(1, bbox.y1 - bbox.y0 + pad * 2)
+        });
+      }
+    }
+
+    return regions;
+  } catch (err) {
+    console.warn('OCR failed, skipping URL region detection:', err.message);
+    return [];
+  } finally {
+    if (worker) await worker.terminate().catch(() => null);
+  }
+}
+
+async function blurRegionsInImage(buffer, regions) {
+  const metadata = await sharp(buffer).metadata();
+  const imgWidth = metadata.width;
+  const imgHeight = metadata.height;
+
+  const composites = await Promise.all(
+    regions.map(async (region) => {
+      const left = Math.min(region.left, imgWidth - 1);
+      const top = Math.min(region.top, imgHeight - 1);
+      const width = Math.min(region.width, imgWidth - left);
+      const height = Math.min(region.height, imgHeight - top);
+
+      const blurredRegion = await sharp(buffer)
+        .extract({ left, top, width, height })
+        .blur(18)
+        .toBuffer();
+
+      return { input: blurredRegion, left, top };
+    })
+  );
+
+  return sharp(buffer).composite(composites).png().toBuffer();
 }
 
 async function safeDelete(message, reason) {
