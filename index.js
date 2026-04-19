@@ -13,7 +13,7 @@ const config = require('./config.json');
 if (process.env.DISCORD_TOKEN) {
   config.token = process.env.DISCORD_TOKEN;
 }
-const linkRegex = /(https?:\/\/[^\s]+)/gi;
+const linkRegex = /(https?:\/\/[^\s]+)/i;
 
 const client = new Client({
   intents: [
@@ -116,6 +116,13 @@ async function handleMessage(message) {
   }).join(' ');
 
   const fullText = `${content} ${embedUrls}`.trim();
+  const imageAttachments = message.attachments.filter((attachment) => {
+    return attachment.contentType?.startsWith('image/') || attachment.url.match(/\.(jpe?g|png|gif|webp)$/i);
+  });
+  const hasLinkInMessage = linkRegex.test(fullText);
+
+  console.log(`[msg] #${message.channel.name} | ${message.author.tag} | link=${hasLinkInMessage} | images=${imageAttachments.size} | content="${content.slice(0, 80)}"`);
+
   const foundRestricted = findRestrictedWord(fullText);
   if (foundRestricted) {
     console.log(`Restricted word detected in message ${message.id} from ${message.author.tag}`);
@@ -124,22 +131,20 @@ async function handleMessage(message) {
     return;
   }
 
-  const hasLinkInMessage = linkRegex.test(fullText);
-  const imageAttachments = message.attachments.filter((attachment) => {
-    return attachment.contentType?.startsWith('image/') || attachment.url.match(/\.(jpe?g|png|gif|webp)$/i);
-  });
-
   if (hasLinkInMessage && imageAttachments.size > 0) {
+    console.log(`Link + image detected in message ${message.id} from ${message.author.tag} — blurring image.`);
     await handleImageAttachments(message, imageAttachments, true);
     return;
   }
 
   if (hasLinkInMessage) {
+    console.log(`Link detected in message ${message.id} from ${message.author.tag} — deleting.`);
     await safeDelete(message, `<@${message.author.id}> Links are not allowed in this server.`);
     return;
   }
 
   if (imageAttachments.size > 0) {
+    console.log(`Image-only message ${message.id} from ${message.author.tag} — checking against restricted images.`);
     await handleImageAttachments(message, imageAttachments, false);
     return;
   }
