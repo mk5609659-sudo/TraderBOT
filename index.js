@@ -10,6 +10,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const config = require('./config.json');
+if (process.env.DISCORD_TOKEN) {
+  config.token = process.env.DISCORD_TOKEN;
+}
 const linkRegex = /(https?:\/\/[^\s]+)/gi;
 
 const client = new Client({
@@ -37,7 +40,7 @@ async function main() {
   await ensureFolders();
   restrictedWords = await loadRestrictedWords();
   if (!config.token || config.token === 'YOUR_DISCORD_BOT_TOKEN_HERE') {
-    throw new Error('Discord bot token is missing in config.json.');
+    throw new Error('Discord bot token is missing. Set the DISCORD_TOKEN secret or add it to config.json.');
   }
   await client.login(config.token).catch((error) => {
     console.error('Failed to login to Discord:', error.message);
