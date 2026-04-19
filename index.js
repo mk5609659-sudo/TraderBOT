@@ -185,7 +185,7 @@ async function handleImageAttachments(message, attachments, linkDetected) {
 }
 
 async function detectUrlRegionsInImage(buffer) {
-  const urlWordPattern = /https?:|www\.|\/\/|\.(com|net|org|io|co|me|ly|gg|uk|de|fr|ru|jp)\b/i;
+  const urlWordPattern = /https?:|www\.|\/\/|\.(com|net|org|io|co|me|ly|gg|uk|de|fr|ru|jp)\b|[a-z]{4,}(com|net|org|io)\b|\/[a-z0-9]{2,}/i;
   let worker;
   try {
     const meta = await sharp(buffer).metadata();
