@@ -2,7 +2,6 @@ node_modules/
 dist/
 __pycache__/
 *.pyc
-config.json
 models/
 *.log
 .DS_Store

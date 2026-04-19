@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, Events } = require('discord.js');
-const { joinVoiceChannel, getVoiceConnection, EndBehaviorType } = require('@discordjs/voice');
+const { joinVoiceChannel, getVoiceConnection, EndBehaviorType, createAudioPlayer, createAudioResource, StreamType, NoSubscriberBehavior, AudioPlayerStatus } = require('@discordjs/voice');
+const { Readable } = require('stream');
 const prism = require('prism-media');
 const axios = require('axios');
 const sharp = require('sharp');
@@ -26,8 +27,10 @@ const voiceConnections = new Map();
 const voiceReadyTimeouts = new Map();
 const voiceReconnectAttempts = new Map();
 const voiceReceiverReady = new Set();
+const voiceKeepalivePlayers = new Map();
 const pendingVoiceMute = new Map();
 let restrictedWords = [];
+let hasLoggedVoicePermissions = false;
 
 async function main() {
   console.log('Starting TraderBOT...');
@@ -229,6 +232,7 @@ async function findRestrictedImage(buffer) {
 }
 
 async function handleVoiceStateUpdate(oldState, newState) {
+  if (!config.enableVoice) return;
   const guild = newState.guild;
   if (newState.member?.user?.bot) return;
 
@@ -264,7 +268,10 @@ async function joinChannelIfNeeded(channel) {
     const perms = channel.permissionsFor(me);
     if (!perms.has('Connect')) missing.push('Connect');
     if (!perms.has('Speak')) missing.push('Speak');
-    console.log(`Bot voice permissions in channel ${channel.name}: ${perms.toArray().sort().join(', ')}`);
+    if (!hasLoggedVoicePermissions) {
+      console.log(`Bot voice permissions in channel ${channel.name}: ${perms.toArray().sort().join(', ')}`);
+      hasLoggedVoicePermissions = true;
+    }
     if (missing.length > 0) {
       console.warn(`Missing voice permissions for bot in channel ${channel.name} of guild ${channel.guild.name}: ${missing.join(', ')}`);
       return;
@@ -276,11 +283,12 @@ async function joinChannelIfNeeded(channel) {
     guildId: channel.guild.id,
     adapterCreator: channel.guild.voiceAdapterCreator,
     selfDeaf: false,
-    selfMute: true
+    selfMute: false
   });
 
   voiceConnections.set(channel.guild.id, connection);
   console.log(`Joined voice channel ${channel.name} in guild ${channel.guild.name}`);
+  console.log(`Bot joined voice channel and will play a join sound once the connection is ready.`);
   scheduleVoiceReadyCheck(connection, channel);
 
   connection.on('error', (error) => {
@@ -293,11 +301,13 @@ async function joinChannelIfNeeded(channel) {
 
   connection.on('stateChange', (oldState, newState) => {
     console.log(`Voice connection state changed for guild ${channel.guild.name}: ${oldState.status} -> ${newState.status}`);
-    if (newState.status === 'ready') {
+    if (newState.status === 'ready' && oldState.status !== 'ready') {
       console.log(`Voice connection is READY in guild ${channel.guild.name}. Audio receive should now work.`);
       clearVoiceReadyCheck(channel.guild.id);
       voiceReconnectAttempts.delete(channel.guild.id);
+      setupVoiceKeepAlive(connection, channel);
       setupVoiceReceiver(connection, channel);
+      playJoinSound(connection, channel);
     }
     if (newState.status === 'disconnected') {
       console.log(`Voice connection is DISCONNECTED in guild ${channel.guild.name}. Waiting or reconnecting may be needed.`);
@@ -307,6 +317,7 @@ async function joinChannelIfNeeded(channel) {
       clearVoiceReadyCheck(channel.guild.id);
       voiceReconnectAttempts.delete(channel.guild.id);
       voiceReceiverReady.delete(channel.guild.id);
+      cleanupVoiceKeepAlive(channel.guild.id);
     }
   });
 }
@@ -349,6 +360,122 @@ function setupVoiceReceiver(connection, channel) {
     if (userId === client.user.id) return;
     console.log(`User ${userId} stopped speaking in ${channel.name}`);
   });
+}
+
+function setupVoiceKeepAlive(connection, channel) {
+  const guildId = channel.guild.id;
+  if (voiceKeepalivePlayers.has(guildId)) return;
+
+  const player = createAudioPlayer({
+    behaviors: {
+      noSubscriber: NoSubscriberBehavior.Play
+    }
+  });
+
+  const silenceStream = new Readable({
+    read(size) {
+      this.push(Buffer.alloc(size, 0));
+    }
+  });
+
+  const resource = createAudioResource(silenceStream, {
+    inputType: StreamType.Raw
+  });
+
+  const subscription = connection.subscribe(player);
+  player.play(resource);
+  voiceKeepalivePlayers.set(guildId, { player, subscription, silenceStream });
+
+  player.on('error', (error) => {
+    console.error(`Voice keepalive player error for guild ${channel.guild.name}:`, error);
+  });
+
+  console.log(`Started voice keepalive for guild ${channel.guild.name}.`);
+}
+
+function createJoinTone(durationMs = 1200, frequency = 880) {
+  const sampleRate = 48000;
+  const channels = 2;
+  const totalSamples = Math.floor((durationMs / 1000) * sampleRate);
+  let sentSamples = 0;
+
+  return new Readable({
+    read(size) {
+      if (sentSamples >= totalSamples) {
+        this.push(null);
+        return;
+      }
+
+      const samplesToSend = Math.min(totalSamples - sentSamples, Math.floor(size / (channels * 2)));
+      const buffer = Buffer.alloc(samplesToSend * channels * 2);
+
+      for (let i = 0; i < samplesToSend; i++) {
+        const t = (sentSamples + i) / sampleRate;
+        const sampleValue = Math.sin(2 * Math.PI * frequency * t) * 0.3;
+        const intValue = Math.floor(sampleValue * 32767);
+        buffer.writeInt16LE(intValue, i * 4);
+        buffer.writeInt16LE(intValue, i * 4 + 2);
+      }
+
+      sentSamples += samplesToSend;
+      this.push(buffer);
+    }
+  });
+}
+
+function muteBotInGuildVoice(guild) {
+  const me = guild.members.me;
+  if (!me || !me.voice.channel) return;
+  me.voice.setMute(true).catch((error) => {
+    console.warn(`Unable to restore bot mute in guild ${guild.name}: ${error.message}`);
+  });
+}
+
+function playJoinSound(connection, channel) {
+  const guildId = channel.guild.id;
+  const player = createAudioPlayer({
+    behaviors: {
+      noSubscriber: NoSubscriberBehavior.Pause
+    }
+  });
+
+  const resource = createAudioResource(createJoinTone(), {
+    inputType: StreamType.Raw
+  });
+
+  const subscription = connection.subscribe(player);
+  player.play(resource);
+
+  player.on('error', (error) => {
+    console.error(`Join sound player error for guild ${channel.guild.name}:`, error);
+  });
+
+  player.on(AudioPlayerStatus.Idle, () => {
+    subscription?.unsubscribe();
+    console.log(`Join sound completed for guild ${channel.guild.name}. Restoring server mute.`);
+    muteBotInGuildVoice(channel.guild);
+  });
+
+  console.log(`Playing join sound in ${channel.name} for guild ${channel.guild.name}.`);
+}
+
+function cleanupVoiceKeepAlive(guildId) {
+  const keepalive = voiceKeepalivePlayers.get(guildId);
+  if (!keepalive) return;
+
+  try {
+    keepalive.subscription?.unsubscribe();
+  } catch (error) {
+    console.warn(`Failed to unsubscribe keepalive for guild ${guildId}: ${error.message}`);
+  }
+
+  try {
+    keepalive.player?.stop();
+  } catch (error) {
+    console.warn(`Failed to stop keepalive player for guild ${guildId}: ${error.message}`);
+  }
+
+  voiceKeepalivePlayers.delete(guildId);
 }
 
 function startVoiceCapture(receiver, userId, member, guild) {
