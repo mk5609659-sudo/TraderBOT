@@ -318,7 +318,6 @@ async function joinChannelIfNeeded(channel) {
     if (newState.status === 'destroyed') {
       console.log(`Voice connection was DESTROYED in guild ${channel.guild.name}.`);
       clearVoiceReadyCheck(channel.guild.id);
-      voiceReconnectAttempts.delete(channel.guild.id);
       voiceReceiverReady.delete(channel.guild.id);
       cleanupVoiceKeepAlive(channel.guild.id);
     }
@@ -685,7 +684,9 @@ async function scheduleVoiceReadyCheck(connection, channel) {
         console.log(`Rejoin attempt ${attempt} for guild ${channel.guild.name}`);
         await joinChannelIfNeeded(channel);
       } else {
+        voiceConnections.delete(guildId);
         console.warn(`Max voice reconnect attempts reached for guild ${channel.guild.name}. Stopping reconnects.`);
+        console.warn(`Voice connection could not reach READY state. This is likely because Discord voice requires UDP traffic, which may be blocked in this hosting environment. Voice monitoring will be unavailable.`);
       }
     } else {
       if (status === 'ready') {
