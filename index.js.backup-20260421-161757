@@ -43,10 +43,6 @@ async function main() {
   if (!config.token || config.token === 'YOUR_DISCORD_BOT_TOKEN_HERE') {
     throw new Error('Discord bot token is missing. Set the DISCORD_TOKEN secret or add it to config.json.');
   }
-  Promise.all([
-    loadRestrictedHashes().catch((e) => console.warn('Pre-warm restricted hashes failed:', e.message)),
-    getOcrWorker().catch((e) => console.warn('Pre-warm OCR worker failed:', e.message)),
-  ]).then(() => console.log('Warm-up complete: restricted hashes + OCR worker ready.'));
   await client.login(config.token).catch((error) => {
     console.error('Failed to login to Discord:', error.message);
     process.exit(1);
@@ -188,52 +184,11 @@ async function handleImageAttachments(message, attachments, linkDetected) {
   }
 }
 
-let ocrWorkerPromise = null;
-async function getOcrWorker() {
-  if (!ocrWorkerPromise) {
-    ocrWorkerPromise = (async () => {
-      console.log('[OCR] initializing persistent worker...');
-      const w = await createWorker('eng');
-      await w.setParameters({ tessedit_pageseg_mode: 11 });
-      console.log('[OCR] worker ready.');
-      return w;
-    })().catch((e) => { ocrWorkerPromise = null; throw e; });
-  }
-  return ocrWorkerPromise;
-}
-
-const ocrQueue = [];
-let ocrBusy = false;
-async function runOcr(buf) {
-  return new Promise((resolve, reject) => {
-    ocrQueue.push({ buf, resolve, reject });
-    drainOcr();
-  });
-}
-async function drainOcr() {
-  if (ocrBusy) return;
-  const job = ocrQueue.shift();
-  if (!job) return;
-  ocrBusy = true;
-  try {
-    const w = await getOcrWorker();
-    const { data } = await w.recognize(job.buf, {}, { tsv: true, text: true });
-    job.resolve(data);
-  } catch (e) {
-    job.reject(e);
-  } finally {
-    ocrBusy = false;
-    drainOcr();
-  }
-}
-
 async function detectUrlRegionsInImage(buffer) {
   const urlWordPattern = /https?:|www\.|\/\/|\.(com|net|org|io|co|me|ly|gg|uk|de|fr|ru|jp)\b|[a-z]{4,}(com|net|org|io)\b|\/[a-z0-9]{2,}/i;
+  let worker;
   try {
     const meta = await sharp(buffer).metadata();
-    if (!meta.width || meta.width < 120 || meta.height < 120) {
-      return [];
-    }
     const targetWidth = Math.max(meta.width, 1200);
     const scale = meta.width / targetWidth;
 
@@ -242,7 +197,9 @@ async function detectUrlRegionsInImage(buffer) {
       .png()
       .toBuffer();
 
-    const data = await runOcr(processBuffer);
+    worker = await createWorker('eng');
+    await worker.setParameters({ tessedit_pageseg_mode: 11 });
+    const { data } = await worker.recognize(processBuffer, {}, { tsv: true, text: true });
 
     console.log(`[OCR] Detected text: "${(data.text || '').replace(/\n/g, ' ').slice(0, 300)}"`);
 
@@ -301,6 +258,8 @@ async function detectUrlRegionsInImage(buffer) {
   } catch (err) {
     console.warn('OCR failed, skipping URL region detection:', err.message);
     return [];
+  } finally {
+    if (worker) await worker.terminate().catch(() => null);
   }
 }
 
@@ -394,15 +353,16 @@ async function computeImageVariants(buffer) {
     { left: Math.round(W * 0.5), top: 0, width: W - Math.round(W * 0.5), height: H },
   ];
 
-  const hashes = await Promise.all(regions.map(async (r) => {
+  const hashes = [];
+  for (const r of regions) {
     try {
-      const buf = r ? await sharp(buffer).extract(r).toBuffer() : buffer;
-      return await computeDHash(buf);
-    } catch (e) {
-      return null;
-    }
-  }));
-  return hashes.filter(Boolean);
+      const buf = r
+        ? await sharp(buffer).extract(r).toBuffer()
+        : buffer;
+      hashes.push(await computeDHash(buf));
+    } catch (e) {}
+  }
+  return hashes;
 }
 
 function hammingDistance(hashA, hashB) {
@@ -435,7 +395,7 @@ async function loadRestrictedHashes() {
 }
 
 async function findRestrictedImage(buffer) {
-  if (restrictedHashCache.size === 0) await loadRestrictedHashes();
+  await loadRestrictedHashes();
   if (restrictedHashCache.size === 0) return false;
 
   const incoming = await computeImageVariants(buffer);
