@@ -28,3 +28,10 @@ args = "npm start"
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[ports]]
+localPort = 10000
+externalPort = 80
+
+[deployment]
+deploymentTarget = "cloudrun"

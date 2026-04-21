@@ -317,18 +317,52 @@ async function blurImage(buffer) {
   return sharp(buffer).blur(20).toBuffer();
 }
 
-async function computeImageHash(buffer) {
-  const resized = await sharp(buffer)
-    .resize(16, 16, { fit: 'fill' })
+async function computeDHash(buffer) {
+  const w = 9, h = 8;
+  const pixels = await sharp(buffer)
+    .removeAlpha()
+    .resize(w, h, { fit: 'fill' })
     .grayscale()
+    .normalise()
     .raw()
     .toBuffer();
 
-  const total = resized.reduce((sum, v) => sum + v, 0);
-  const average = total / resized.length;
-  return Array.from(resized)
-    .map((value) => (value > average ? '1' : '0'))
-    .join('');
+  let hash = '';
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w - 1; x++) {
+      const left = pixels[y * w + x];
+      const right = pixels[y * w + x + 1];
+      hash += left < right ? '1' : '0';
+    }
+  }
+  return hash;
+}
+
+async function computeImageVariants(buffer) {
+  const meta = await sharp(buffer).metadata();
+  const W = meta.width || 0;
+  const H = meta.height || 0;
+  if (!W || !H) return [await computeDHash(buffer)];
+
+  const regions = [
+    null,
+    { left: Math.round(W * 0.15), top: Math.round(H * 0.15), width: Math.round(W * 0.70), height: Math.round(H * 0.70) },
+    { left: 0, top: 0, width: W, height: Math.round(H * 0.5) },
+    { left: 0, top: Math.round(H * 0.5), width: W, height: H - Math.round(H * 0.5) },
+    { left: 0, top: 0, width: Math.round(W * 0.5), height: H },
+    { left: Math.round(W * 0.5), top: 0, width: W - Math.round(W * 0.5), height: H },
+  ];
+
+  const hashes = [];
+  for (const r of regions) {
+    try {
+      const buf = r
+        ? await sharp(buffer).extract(r).toBuffer()
+        : buffer;
+      hashes.push(await computeDHash(buf));
+    } catch (e) {}
+  }
+  return hashes;
 }
 
 function hammingDistance(hashA, hashB) {
@@ -339,19 +373,49 @@ function hammingDistance(hashA, hashB) {
   return distance;
 }
 
-async function findRestrictedImage(buffer) {
-  const imageHash = await computeImageHash(buffer);
+const restrictedHashCache = new Map();
+
+async function loadRestrictedHashes() {
   const files = await fsp.readdir(config.restrictedImageFolder).catch(() => []);
-  for (const file of files) {
-    if (!file.match(/\.(jpe?g|png|gif|webp|bmp)$/i)) continue;
-    const otherBuffer = await fsp.readFile(path.join(config.restrictedImageFolder, file));
-    const otherHash = await computeImageHash(otherBuffer);
-    const distance = hammingDistance(imageHash, otherHash);
-    const similarity = 1 - distance / imageHash.length;
-    if (similarity >= 0.95) {
-      return true;
+  const validFiles = files.filter((f) => f.match(/\.(jpe?g|png|gif|webp|bmp)$/i));
+  for (const file of validFiles) {
+    if (restrictedHashCache.has(file)) continue;
+    try {
+      const buf = await fsp.readFile(path.join(config.restrictedImageFolder, file));
+      const variants = await computeImageVariants(buf);
+      restrictedHashCache.set(file, variants);
+      console.log(`[restricted] cached ${variants.length} hash variants for ${file}`);
+    } catch (e) {
+      console.warn(`[restricted] failed to hash ${file}:`, e.message);
     }
   }
+  for (const cached of restrictedHashCache.keys()) {
+    if (!validFiles.includes(cached)) restrictedHashCache.delete(cached);
+  }
+}
+
+async function findRestrictedImage(buffer) {
+  await loadRestrictedHashes();
+  if (restrictedHashCache.size === 0) return false;
+
+  const incoming = await computeImageVariants(buffer);
+  const THRESHOLD = 0.78;
+
+  let bestSim = 0;
+  let bestFile = null;
+  for (const [file, variants] of restrictedHashCache) {
+    for (const a of incoming) {
+      for (const b of variants) {
+        const sim = 1 - hammingDistance(a, b) / a.length;
+        if (sim > bestSim) { bestSim = sim; bestFile = file; }
+        if (sim >= THRESHOLD) {
+          console.log(`[restricted] match ${file} similarity=${sim.toFixed(3)}`);
+          return true;
+        }
+      }
+    }
+  }
+  if (bestFile) console.log(`[restricted] no match (best: ${bestFile} sim=${bestSim.toFixed(3)})`);
   return false;
 }
 
@@ -778,8 +842,7 @@ function getModerationChannel(guild) {
 
 function clearVoiceReadyCheck(guildId) {
   const timeout = voiceReadyTimeouts.get(guildId);
-  if (timeout) {
-    clearTimeout(timeout);
+  if (timeout) {    clearTimeout(timeout);
     voiceReadyTimeouts.delete(guildId);
   }
 }
