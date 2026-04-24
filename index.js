@@ -16,6 +16,26 @@ if (process.env.DISCORD_TOKEN) {
 }
 const linkRegex = /(https?:\/\/[^\s]+)/i;
 
+const WELCOME_FILE = './welcome.json';
+let welcomeConfig = {};
+async function loadWelcomeConfig() {
+  try {
+    const raw = await fsp.readFile(WELCOME_FILE, 'utf-8');
+    welcomeConfig = JSON.parse(raw);
+  } catch {
+    welcomeConfig = {};
+  }
+}
+async function saveWelcomeConfig() {
+  await fsp.writeFile(WELCOME_FILE, JSON.stringify(welcomeConfig, null, 2));
+}
+function getGuildWelcome(guildId) {
+  if (!welcomeConfig[guildId]) {
+    welcomeConfig[guildId] = { enabled: true, welcomeChannelId: null, rulesChannelId: null, serverName: null };
+  }
+  return welcomeConfig[guildId];
+}
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -40,6 +60,7 @@ async function main() {
   console.log('Starting TraderBOT...');
   await ensureFolders();
   restrictedWords = await loadRestrictedWords();
+  await loadWelcomeConfig();
   if (!config.token || config.token === 'YOUR_DISCORD_BOT_TOKEN_HERE') {
     throw new Error('Discord bot token is missing. Set the DISCORD_TOKEN secret or add it to config.json.');
   }
@@ -112,8 +133,22 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   }
 });
 
+client.on(Events.GuildMemberAdd, async (member) => {
+  try {
+    await handleMemberJoin(member);
+  } catch (error) {
+    console.error('Member join handler error:', error);
+  }
+});
+
 async function handleMessage(message) {
   const content = message.content || '';
+
+  if (content.startsWith('!') && message.guild) {
+    const handled = await handleAdminCommand(message);
+    if (handled) return;
+  }
+
   const embedUrls = message.embeds.flatMap((embed) => {
     const urls = [embed.url, embed.author?.url, embed.image?.url, embed.video?.url, embed.thumbnail?.url];
     if (embed.fields) urls.push(...embed.fields.map((field) => field.value));
@@ -977,6 +1012,220 @@ function startPythonVoiceService() {
   pythonProcess.on('close', (code) => {
     console.log(`Voice service exited with code ${code}`);
   });
+}
+
+function isAdmin(member) {
+  if (!member) return false;
+  return member.permissions.has('Administrator') ||
+         member.permissions.has('ManageGuild') ||
+         member.permissions.has('ManageChannels');
+}
+
+async function handleAdminCommand(message) {
+  const parts = message.content.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const welcomeCommands = ['!setwelcome', '!setrules', '!setservername', '!testwelcome', '!disablewelcome', '!enablewelcome', '!welcomeinfo', '!welcomehelp'];
+  if (!welcomeCommands.includes(cmd)) return false;
+
+  if (!isAdmin(message.member)) {
+    await message.reply('You need Administrator or Manage Server permission to use this command.').catch(() => null);
+    return true;
+  }
+
+  const gw = getGuildWelcome(message.guild.id);
+
+  switch (cmd) {
+    case '!setwelcome': {
+      const channel = message.mentions.channels.first() || message.channel;
+      gw.welcomeChannelId = channel.id;
+      await saveWelcomeConfig();
+      await message.reply(`Welcome messages will be sent to <#${channel.id}>.`).catch(() => null);
+      return true;
+    }
+    case '!setrules': {
+      const channel = message.mentions.channels.first();
+      if (!channel) {
+        await message.reply('Usage: `!setrules #channel`').catch(() => null);
+        return true;
+      }
+      gw.rulesChannelId = channel.id;
+      await saveWelcomeConfig();
+      await message.reply(`Rules channel set to <#${channel.id}>.`).catch(() => null);
+      return true;
+    }
+    case '!setservername': {
+      const name = parts.slice(1).join(' ').trim();
+      if (!name) {
+        await message.reply('Usage: `!setservername <name shown in welcome message>`').catch(() => null);
+        return true;
+      }
+      gw.serverName = name.slice(0, 80);
+      await saveWelcomeConfig();
+      await message.reply(`Welcome banner will say "${gw.serverName}".`).catch(() => null);
+      return true;
+    }
+    case '!enablewelcome': {
+      gw.enabled = true;
+      await saveWelcomeConfig();
+      await message.reply('Welcome messages enabled.').catch(() => null);
+      return true;
+    }
+    case '!disablewelcome': {
+      gw.enabled = false;
+      await saveWelcomeConfig();
+      await message.reply('Welcome messages disabled.').catch(() => null);
+      return true;
+    }
+    case '!testwelcome': {
+      await sendWelcome(message.member, true);
+      return true;
+    }
+    case '!welcomeinfo': {
+      const ch = gw.welcomeChannelId ? `<#${gw.welcomeChannelId}>` : 'not set';
+      const rules = gw.rulesChannelId ? `<#${gw.rulesChannelId}>` : 'not set';
+      const sname = gw.serverName || message.guild.name;
+      await message.reply(
+        `**Welcome settings**\n` +
+        `Status: ${gw.enabled ? 'enabled' : 'disabled'}\n` +
+        `Welcome channel: ${ch}\n` +
+        `Rules channel: ${rules}\n` +
+        `Server name: ${sname}`
+      ).catch(() => null);
+      return true;
+    }
+    case '!welcomehelp': {
+      await message.reply(
+        `**Welcome commands** (admin only)\n` +
+        '`!setwelcome` — set this channel (or mention one) as the welcome channel\n' +
+        '`!setrules #channel` — set the rules channel shown in the message\n' +
+        '`!setservername <name>` — customise the name shown on the welcome banner\n' +
+        '`!enablewelcome` / `!disablewelcome` — turn welcome messages on/off\n' +
+        '`!testwelcome` — preview the welcome message using yourself\n' +
+        '`!welcomeinfo` — show current settings\n\n' +
+        'Tip: drop a custom background image at `assets/welcome_bg.png` (1024×450 recommended).'
+      ).catch(() => null);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function handleMemberJoin(member) {
+  if (member.user.bot) return;
+  const gw = getGuildWelcome(member.guild.id);
+  if (!gw.enabled || !gw.welcomeChannelId) return;
+  await sendWelcome(member, false);
+}
+
+async function sendWelcome(member, isTest) {
+  const gw = getGuildWelcome(member.guild.id);
+  const channelId = gw.welcomeChannelId;
+  if (!channelId) {
+    console.log(`[welcome] no channel configured for ${member.guild.name}`);
+    return;
+  }
+  const channel = await member.guild.channels.fetch(channelId).catch(() => null);
+  if (!channel || !channel.isTextBased()) {
+    console.log(`[welcome] channel ${channelId} not found or not text channel`);
+    return;
+  }
+
+  const serverName = gw.serverName || member.guild.name;
+  const rulesMention = gw.rulesChannelId ? `<#${gw.rulesChannelId}>` : '`#rules`';
+
+  let bannerAttachment = null;
+  try {
+    const banner = await generateWelcomeBanner(member, serverName);
+    bannerAttachment = { attachment: banner, name: 'welcome.png' };
+  } catch (err) {
+    console.warn('[welcome] banner generation failed:', err.message);
+  }
+
+  const lines = [
+    `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`,
+    `\uD83D\uDC96 Welcome to **${serverName}** \uD83D\uDC96`,
+    ``,
+    `Hope you have a good time here <@${member.id}>`,
+    ``,
+    `Check ${rulesMention} \u2705`,
+    `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`,
+  ];
+
+  const payload = { content: lines.join('\n') };
+  if (bannerAttachment) payload.files = [bannerAttachment];
+
+  await channel.send(payload).catch((e) => console.warn('[welcome] failed to send:', e.message));
+  console.log(`[welcome] sent for ${member.user.tag}${isTest ? ' (test)' : ''} in ${channel.name}`);
+}
+
+async function generateWelcomeBanner(member, serverName) {
+  const W = 1024, H = 450;
+  const bgPath = path.join(__dirname, 'assets', 'welcome_bg.png');
+  let baseImage;
+  if (fs.existsSync(bgPath)) {
+    baseImage = await sharp(bgPath).resize(W, H, { fit: 'cover' }).toBuffer();
+  } else {
+    const gradientSvg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#1a1a2e"/>
+        <stop offset="50%" stop-color="#3d2c5e"/>
+        <stop offset="100%" stop-color="#0f0f1e"/>
+      </linearGradient></defs>
+      <rect width="${W}" height="${H}" fill="url(#g)"/>
+    </svg>`;
+    baseImage = await sharp(Buffer.from(gradientSvg)).png().toBuffer();
+  }
+
+  const dimOverlay = await sharp({
+    create: { width: W, height: H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.35 } }
+  }).png().toBuffer();
+
+  const avatarUrl = member.user.displayAvatarURL({ extension: 'png', size: 256, forceStatic: true });
+  const avatarBuf = await fetchImageBuffer(avatarUrl);
+  const AV = 200;
+  const avatarResized = await sharp(avatarBuf).resize(AV, AV, { fit: 'cover' }).png().toBuffer();
+  const circleMask = Buffer.from(
+    `<svg width="${AV}" height="${AV}"><circle cx="${AV/2}" cy="${AV/2}" r="${AV/2}" fill="white"/></svg>`
+  );
+  const avatarRound = await sharp(avatarResized)
+    .composite([{ input: circleMask, blend: 'dest-in' }])
+    .png().toBuffer();
+
+  const ringSize = AV + 16;
+  const ringSvg = Buffer.from(
+    `<svg width="${ringSize}" height="${ringSize}">
+      <circle cx="${ringSize/2}" cy="${ringSize/2}" r="${ringSize/2 - 4}" fill="none" stroke="#22c55e" stroke-width="6"/>
+    </svg>`
+  );
+  const ring = await sharp(ringSvg).png().toBuffer();
+
+  const username = (member.displayName || member.user.username).slice(0, 28);
+  const safeName = username.replace(/[<>&"']/g, '');
+  const safeServer = serverName.replace(/[<>&"']/g, '').slice(0, 50);
+
+  const textSvg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+    <style>
+      .welcome { font: bold 78px sans-serif; fill: #ffffff; }
+      .name { font: bold 44px sans-serif; fill: #ff6b9d; }
+      .server { font: 600 28px sans-serif; fill: #e0e0e0; }
+    </style>
+    <text x="50%" y="320" text-anchor="middle" class="welcome">WELCOME</text>
+    <text x="50%" y="370" text-anchor="middle" class="name">${safeName}</text>
+    <text x="50%" y="412" text-anchor="middle" class="server">${safeServer} \u2705</text>
+  </svg>`;
+
+  const avatarX = Math.round((W - ringSize) / 2);
+  const avatarY = 30;
+
+  return sharp(baseImage)
+    .composite([
+      { input: dimOverlay, top: 0, left: 0 },
+      { input: ring, top: avatarY, left: avatarX },
+      { input: avatarRound, top: avatarY + 8, left: avatarX + 8 },
+      { input: Buffer.from(textSvg), top: 0, left: 0 },
+    ])
+    .png()
+    .toBuffer();
 }
 
 main().catch((error) => {
