@@ -142,12 +142,26 @@ client.on(Events.GuildMemberAdd, async (member) => {
   }
 });
 
+function isProtectedFromModeration(message) {
+  if (!message.guild || !message.member) return false;
+  if (message.author.id === message.guild.ownerId) return true;
+  const m = message.member;
+  if (m.permissions.has('Administrator')) return true;
+  if (m.permissions.has('ManageGuild')) return true;
+  if (m.permissions.has('ManageMessages')) return true;
+  return false;
+}
+
 async function handleMessage(message) {
   const content = message.content || '';
 
   if (content.startsWith('!') && message.guild) {
     const handled = await handleAdminCommand(message);
     if (handled) return;
+  }
+
+  if (isProtectedFromModeration(message)) {
+    return;
   }
 
   const embedUrls = message.embeds.flatMap((embed) => {
