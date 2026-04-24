@@ -30,6 +30,10 @@ args = "npm start"
 outputType = "console"
 
 [[ports]]
+localPort = 5050
+externalPort = 3000
+
+[[ports]]
 localPort = 10000
 externalPort = 80
 

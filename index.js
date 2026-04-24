@@ -62,6 +62,7 @@ async function main() {
   await ensureFolders();
   restrictedWords = await loadRestrictedWords();
   await loadWelcomeConfig();
+  startControlWebServer();
   if (!config.token || config.token === 'YOUR_DISCORD_BOT_TOKEN_HERE') {
     throw new Error('Discord bot token is missing. Set the DISCORD_TOKEN secret or add it to config.json.');
   }
@@ -1046,20 +1047,45 @@ function stopPythonVoiceService() {
   voiceServiceStatus = 'stopping';
 }
 
+let controlServer = null;
+let controlChoiceMade = false;
+
+function shutdownControlServer(reason) {
+  if (!controlServer) return;
+  console.log(`[control] shutting down web server (${reason}).`);
+  try { controlServer.close(); } catch {}
+  controlServer = null;
+}
+
 function startControlWebServer() {
   const port = parseInt(process.env.PORT || '5050', 10);
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     if (req.method === 'POST' && url.pathname === '/voice/start') {
+      controlChoiceMade = true;
       startPythonVoiceService();
-      res.writeHead(302, { Location: '/' });
-      return res.end();
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Voice service starting</title>
+        <style>body{font-family:system-ui,sans-serif;background:#0f0f1e;color:#eee;margin:0;padding:40px;text-align:center}
+        .card{max-width:480px;margin:0 auto;background:#1a1a2e;border:1px solid #2d2d4a;border-radius:14px;padding:32px}
+        h1{color:#16a34a}</style></head><body><div class="card">
+        <h1>Voice service is starting</h1><p>This control page is now closing. The bot keeps running.</p>
+        </div></body></html>`);
+      setTimeout(() => shutdownControlServer('user chose YES'), 500);
+      return;
     }
     if (req.method === 'POST' && url.pathname === '/voice/stop') {
-      stopPythonVoiceService();
-      res.writeHead(302, { Location: '/' });
-      return res.end();
+      controlChoiceMade = true;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html><html><head><meta charset="utf-8"><title>Voice service skipped</title>
+        <style>body{font-family:system-ui,sans-serif;background:#0f0f1e;color:#eee;margin:0;padding:40px;text-align:center}
+        .card{max-width:480px;margin:0 auto;background:#1a1a2e;border:1px solid #2d2d4a;border-radius:14px;padding:32px}
+        h1{color:#dc2626}</style></head><body><div class="card">
+        <h1>Voice service skipped</h1><p>Vosk will not load. This control page is now closing. The bot keeps running.</p>
+        </div></body></html>`);
+      setTimeout(() => shutdownControlServer('user chose NO'), 500);
+      return;
     }
 
     const botStatus = client.isReady() ? `online as ${client.user.tag}` : 'connecting...';
@@ -1112,8 +1138,9 @@ function startControlWebServer() {
     res.end(html);
   });
 
+  controlServer = server;
   server.listen(port, '0.0.0.0', () => {
-    console.log(`[control] web server listening on http://0.0.0.0:${port} — open it to start/stop the voice service.`);
+    console.log(`[control] web server listening on http://0.0.0.0:${port} — open it to choose YES/NO for the voice service. The page will close itself once you decide.`);
   });
   server.on('error', (err) => console.error('[control] server error:', err.message));
 }
