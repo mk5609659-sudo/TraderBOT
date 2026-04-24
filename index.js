@@ -9,6 +9,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
+const http = require('http');
 
 const config = require('./config.json');
 if (process.env.DISCORD_TOKEN) {
@@ -95,9 +96,6 @@ async function loadRestrictedWords() {
 
 client.on(Events.ClientReady, () => {
   console.log(`Bot ready: ${client.user.tag}`);
-  if (config.startPythonVoiceService) {
-    startPythonVoiceService();
-  }
 });
 
 client.on('error', (error) => {
@@ -1011,12 +1009,22 @@ async function applyPendingVoiceMute(voiceState) {
   }, remainingMs);
 }
 
+let voiceServiceProcess = null;
+let voiceServiceStatus = 'not started';
+
 function startPythonVoiceService() {
+  if (voiceServiceProcess) {
+    console.log('[voice-service] already running, ignoring start request.');
+    return;
+  }
+  voiceServiceStatus = 'starting';
   const scriptPath = path.join(__dirname, 'services', 'voice_service.py');
   const pythonProcess = spawn('python', [scriptPath], {
     cwd: __dirname,
     stdio: ['ignore', 'pipe', 'pipe']
   });
+  voiceServiceProcess = pythonProcess;
+  voiceServiceStatus = 'running';
 
   pythonProcess.stdout.on('data', (chunk) => {
     process.stdout.write(`[voice-service] ${chunk}`);
@@ -1026,7 +1034,88 @@ function startPythonVoiceService() {
   });
   pythonProcess.on('close', (code) => {
     console.log(`Voice service exited with code ${code}`);
+    voiceServiceProcess = null;
+    voiceServiceStatus = 'stopped';
   });
+}
+
+function stopPythonVoiceService() {
+  if (!voiceServiceProcess) return;
+  console.log('[voice-service] stopping...');
+  try { voiceServiceProcess.kill('SIGTERM'); } catch {}
+  voiceServiceStatus = 'stopping';
+}
+
+function startControlWebServer() {
+  const port = parseInt(process.env.PORT || '5050', 10);
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (req.method === 'POST' && url.pathname === '/voice/start') {
+      startPythonVoiceService();
+      res.writeHead(302, { Location: '/' });
+      return res.end();
+    }
+    if (req.method === 'POST' && url.pathname === '/voice/stop') {
+      stopPythonVoiceService();
+      res.writeHead(302, { Location: '/' });
+      return res.end();
+    }
+
+    const botStatus = client.isReady() ? `online as ${client.user.tag}` : 'connecting...';
+    const guilds = client.isReady() ? client.guilds.cache.size : 0;
+    const html = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><title>TraderBOT Control</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{font-family:system-ui,sans-serif;background:#0f0f1e;color:#eee;margin:0;padding:24px;display:flex;justify-content:center}
+  .card{max-width:560px;width:100%;background:#1a1a2e;border:1px solid #2d2d4a;border-radius:14px;padding:28px;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+  h1{margin:0 0 6px;font-size:24px}
+  .sub{color:#9aa;font-size:13px;margin-bottom:22px}
+  .row{display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid #2d2d4a}
+  .row:first-of-type{border-top:none}
+  .label{color:#9aa}
+  .val{color:#fff;font-weight:600}
+  .pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}
+  .ok{background:#15803d;color:#fff}.warn{background:#b45309;color:#fff}.off{background:#3a3a4a;color:#ddd}
+  .actions{margin-top:22px;display:flex;gap:10px;flex-wrap:wrap}
+  button{flex:1;min-width:160px;border:0;border-radius:10px;padding:14px 16px;font-size:15px;font-weight:600;cursor:pointer}
+  .yes{background:#16a34a;color:#fff}.yes:hover{background:#15803d}
+  .no{background:#dc2626;color:#fff}.no:hover{background:#b91c1c}
+  .note{margin-top:18px;font-size:12px;color:#778;line-height:1.5}
+  form{margin:0;flex:1}
+</style></head><body><div class="card">
+  <h1>TraderBOT Control</h1>
+  <div class="sub">Manage your Discord bot's voice service.</div>
+
+  <div class="row"><span class="label">Bot</span><span class="val">${botStatus}</span></div>
+  <div class="row"><span class="label">Guilds</span><span class="val">${guilds}</span></div>
+  <div class="row"><span class="label">Voice service</span>
+    <span class="val">
+      <span class="pill ${voiceServiceStatus === 'running' ? 'ok' : voiceServiceStatus === 'starting' || voiceServiceStatus === 'stopping' ? 'warn' : 'off'}">${voiceServiceStatus}</span>
+    </span>
+  </div>
+
+  <h3 style="margin-top:24px;margin-bottom:8px">Do you want to start the Vosk voice service?</h3>
+  <div class="actions">
+    <form method="post" action="/voice/start"><button class="yes" type="submit">Yes, start it</button></form>
+    <form method="post" action="/voice/stop"><button class="no" type="submit">No, keep it off</button></form>
+  </div>
+  <div class="note">
+    Vosk loads a speech model and tries to join voice channels for offline transcription.
+    On hosts that block UDP traffic (like some cloud sandboxes), voice will fail to connect — the bot will keep running normally without it.
+  </div>
+</div></body></html>`;
+
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  });
+
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`[control] web server listening on http://0.0.0.0:${port} — open it to start/stop the voice service.`);
+  });
+  server.on('error', (err) => console.error('[control] server error:', err.message));
 }
 
 function isAdmin(member) {
