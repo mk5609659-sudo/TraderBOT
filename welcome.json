@@ -1,0 +1,14 @@
+{
+  "1424418734033866895": {
+    "enabled": true,
+    "welcomeChannelId": "1424418734549893182",
+    "rulesChannelId": "1424422755767418890",
+    "serverName": null
+  },
+  "1410288848834924576": {
+    "enabled": true,
+    "welcomeChannelId": "1413766900864782336",
+    "rulesChannelId": null,
+    "serverName": null
+  }
+}

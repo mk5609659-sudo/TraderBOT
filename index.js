@@ -67,7 +67,8 @@ async function main() {
   Promise.all([
     loadRestrictedHashes().catch((e) => console.warn('Pre-warm restricted hashes failed:', e.message)),
     getOcrWorker().catch((e) => console.warn('Pre-warm OCR worker failed:', e.message)),
-  ]).then(() => console.log('Warm-up complete: restricted hashes + OCR worker ready.'));
+    preWarmWelcome().catch((e) => console.warn('Pre-warm welcome assets failed:', e.message)),
+  ]).then(() => console.log('Warm-up complete: restricted hashes + OCR worker + welcome assets ready.'));
   await client.login(config.token).catch((error) => {
     console.error('Failed to login to Discord:', error.message);
     process.exit(1);
@@ -1158,27 +1159,64 @@ async function sendWelcome(member, isTest) {
   console.log(`[welcome] sent for ${member.user.tag}${isTest ? ' (test)' : ''} in ${channel.name}`);
 }
 
-async function generateWelcomeBanner(member, serverName) {
-  const W = 1024, H = 450;
+const WELCOME_W = 1024, WELCOME_H = 450;
+let welcomeBaseImageBuf = null;
+let welcomeDimOverlayBuf = null;
+let welcomeRingBuf = null;
+let welcomeBaseImageMtime = 0;
+
+async function buildWelcomeBaseImage() {
   const bgPath = path.join(__dirname, 'assets', 'welcome_bg.png');
-  let baseImage;
-  if (fs.existsSync(bgPath)) {
-    baseImage = await sharp(bgPath).resize(W, H, { fit: 'cover' }).toBuffer();
+  let mtime = 0;
+  try { mtime = (await fsp.stat(bgPath)).mtimeMs; } catch {}
+  if (welcomeBaseImageBuf && mtime === welcomeBaseImageMtime) return welcomeBaseImageBuf;
+
+  if (mtime > 0) {
+    welcomeBaseImageBuf = await sharp(bgPath).resize(WELCOME_W, WELCOME_H, { fit: 'cover' }).toBuffer();
   } else {
-    const gradientSvg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+    const gradientSvg = `<svg width="${WELCOME_W}" height="${WELCOME_H}" xmlns="http://www.w3.org/2000/svg">
       <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
         <stop offset="0%" stop-color="#1a1a2e"/>
         <stop offset="50%" stop-color="#3d2c5e"/>
         <stop offset="100%" stop-color="#0f0f1e"/>
       </linearGradient></defs>
-      <rect width="${W}" height="${H}" fill="url(#g)"/>
+      <rect width="${WELCOME_W}" height="${WELCOME_H}" fill="url(#g)"/>
     </svg>`;
-    baseImage = await sharp(Buffer.from(gradientSvg)).png().toBuffer();
+    welcomeBaseImageBuf = await sharp(Buffer.from(gradientSvg)).png().toBuffer();
   }
+  welcomeBaseImageMtime = mtime;
+  return welcomeBaseImageBuf;
+}
 
-  const dimOverlay = await sharp({
-    create: { width: W, height: H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.35 } }
-  }).png().toBuffer();
+async function buildWelcomeStaticOverlays() {
+  if (!welcomeDimOverlayBuf) {
+    welcomeDimOverlayBuf = await sharp({
+      create: { width: WELCOME_W, height: WELCOME_H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0.35 } }
+    }).png().toBuffer();
+  }
+  if (!welcomeRingBuf) {
+    const AV = 200;
+    const ringSize = AV + 16;
+    const ringSvg = Buffer.from(
+      `<svg width="${ringSize}" height="${ringSize}">
+        <circle cx="${ringSize/2}" cy="${ringSize/2}" r="${ringSize/2 - 4}" fill="none" stroke="#22c55e" stroke-width="6"/>
+      </svg>`
+    );
+    welcomeRingBuf = await sharp(ringSvg).png().toBuffer();
+  }
+}
+
+async function preWarmWelcome() {
+  await buildWelcomeBaseImage();
+  await buildWelcomeStaticOverlays();
+  console.log('[welcome] pre-warmed banner assets.');
+}
+
+async function generateWelcomeBanner(member, serverName) {
+  const W = WELCOME_W, H = WELCOME_H;
+  const baseImage = await buildWelcomeBaseImage();
+  await buildWelcomeStaticOverlays();
+  const dimOverlay = welcomeDimOverlayBuf;
 
   const avatarUrl = member.user.displayAvatarURL({ extension: 'png', size: 256, forceStatic: true });
   const avatarBuf = await fetchImageBuffer(avatarUrl);
@@ -1192,12 +1230,7 @@ async function generateWelcomeBanner(member, serverName) {
     .png().toBuffer();
 
   const ringSize = AV + 16;
-  const ringSvg = Buffer.from(
-    `<svg width="${ringSize}" height="${ringSize}">
-      <circle cx="${ringSize/2}" cy="${ringSize/2}" r="${ringSize/2 - 4}" fill="none" stroke="#22c55e" stroke-width="6"/>
-    </svg>`
-  );
-  const ring = await sharp(ringSvg).png().toBuffer();
+  const ring = welcomeRingBuf;
 
   const username = (member.displayName || member.user.username).slice(0, 28);
   const safeName = username.replace(/[<>&"']/g, '');
