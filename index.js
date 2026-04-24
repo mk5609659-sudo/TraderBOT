@@ -510,6 +510,7 @@ async function findRestrictedImage(buffer) {
 
 async function handleVoiceStateUpdate(oldState, newState) {
   if (!config.enableVoice) return;
+  if (voiceServiceStatus !== 'running') return;
   const guild = newState.guild;
   if (newState.member?.user?.bot) return;
 
