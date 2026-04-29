@@ -205,34 +205,76 @@ async function handleMessage(message) {
 }
 
 async function handleImageAttachments(message, attachments, linkDetected) {
-  for (const attachment of attachments.values()) {
-    const buffer = await fetchImageBuffer(attachment.url);
-    const restricted = await findRestrictedImage(buffer);
-    if (restricted) {
-      await safeDelete(message, `<@${message.author.id}> Restricted image detected and removed.`);
-      return;
-    }
+  const results = await Promise.all(
+    Array.from(attachments.values()).map(async (attachment) => {
+      try {
+        const buffer = await fetchImageBuffer(attachment.url);
+        const baseName = (attachment.name || 'image').replace(/[^\w.\-]/g, '_');
 
-    const urlRegions = await detectUrlRegionsInImage(buffer);
-    if (urlRegions.length > 0) {
-      console.log(`Detected ${urlRegions.length} URL region(s) in image from ${message.author.tag} — blurring only those areas.`);
-      const blurred = await blurRegionsInImage(buffer, urlRegions);
-      await safeDelete(message, `<@${message.author.id}> Your image contained a visible link. Only the link area has been blurred.`);
-      await message.channel.send({
-        content: `<@${message.author.id}> Here is your image with the link area blurred.`,
-        files: [{ attachment: blurred, name: 'blurred.png' }]
-      });
-      return;
-    }
+        if (await findRestrictedImage(buffer)) {
+          return { status: 'restricted', name: baseName };
+        }
 
-    if (linkDetected) {
-      const blurred = await blurImage(buffer);
-      await safeDelete(message, `<@${message.author.id}> Image with link was blurred and reposted.`);
-      await message.channel.send({
-        content: `<@${message.author.id}> Here is the blurred version of the image with the link removed.`,
-        files: [{ attachment: blurred, name: 'blurred.png' }]
-      });
-      return;
+        const urlRegions = await detectUrlRegionsInImage(buffer);
+        if (urlRegions.length > 0) {
+          const blurred = await blurRegionsInImage(buffer, urlRegions);
+          return { status: 'url-blurred', name: baseName, file: blurred };
+        }
+
+        if (linkDetected) {
+          const blurred = await blurImage(buffer);
+          return { status: 'fully-blurred', name: baseName, file: blurred };
+        }
+
+        return { status: 'clean', name: baseName, file: buffer };
+      } catch (err) {
+        console.warn(`[image] failed to process ${attachment.name}:`, err.message);
+        return { status: 'error', name: attachment.name || 'image' };
+      }
+    })
+  );
+
+  const restricted = results.filter((r) => r.status === 'restricted');
+  const urlBlurred = results.filter((r) => r.status === 'url-blurred');
+  const fullyBlurred = results.filter((r) => r.status === 'fully-blurred');
+  const clean = results.filter((r) => r.status === 'clean');
+
+  const needsAction = linkDetected || restricted.length > 0 || urlBlurred.length > 0;
+  if (!needsAction) return;
+
+  const filesToRepost = [];
+  for (const r of clean) filesToRepost.push({ attachment: r.file, name: r.name });
+  for (const r of urlBlurred) filesToRepost.push({ attachment: r.file, name: `blurred-${r.name.replace(/\.[^.]+$/, '')}.png` });
+  for (const r of fullyBlurred) filesToRepost.push({ attachment: r.file, name: `blurred-${r.name.replace(/\.[^.]+$/, '')}.png` });
+
+  const reasonLines = [];
+  if (linkDetected) reasonLines.push('your message contained a link');
+  if (restricted.length > 0) reasonLines.push(`${restricted.length} restricted image(s) removed: ${restricted.map((r) => r.name).join(', ')}`);
+  if (urlBlurred.length > 0) reasonLines.push(`${urlBlurred.length} image(s) had visible URLs and were blurred`);
+
+  await safeDelete(
+    message,
+    `<@${message.author.id}> Original message removed (${reasonLines.join('; ')}).`
+  );
+
+  if (filesToRepost.length > 0) {
+    const summary = [];
+    if (clean.length > 0) summary.push(`${clean.length} clean file(s)`);
+    if (urlBlurred.length > 0) summary.push(`${urlBlurred.length} blurred (URL hidden)`);
+    if (fullyBlurred.length > 0) summary.push(`${fullyBlurred.length} blurred`);
+    if (restricted.length > 0) summary.push(`${restricted.length} restricted file(s) removed`);
+
+    const originalText = (message.content || '').replace(linkRegex, '[link removed]').trim();
+    const lines = [`<@${message.author.id}> Reposted: ${summary.join(', ')}.`];
+    if (originalText) lines.push(`> ${originalText.slice(0, 800)}`);
+
+    const MAX_PER_MSG = 10;
+    for (let i = 0; i < filesToRepost.length; i += MAX_PER_MSG) {
+      const chunk = filesToRepost.slice(i, i + MAX_PER_MSG);
+      const content = i === 0 ? lines.join('\n') : `<@${message.author.id}> (continued)`;
+      await message.channel.send({ content, files: chunk }).catch((e) =>
+        console.warn('[image] failed to repost:', e.message)
+      );
     }
   }
 }
