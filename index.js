@@ -247,25 +247,27 @@ async function handleImageAttachments(message, attachments, linkDetected) {
   for (const r of urlBlurred) filesToRepost.push({ attachment: r.file, name: `blurred-${r.name.replace(/\.[^.]+$/, '')}.png` });
   for (const r of fullyBlurred) filesToRepost.push({ attachment: r.file, name: `blurred-${r.name.replace(/\.[^.]+$/, '')}.png` });
 
+  const plural = (n, singular, pluralForm) => `${n} ${n === 1 ? singular : pluralForm}`;
+
   const reasonLines = [];
   if (linkDetected) reasonLines.push('your message contained a link');
-  if (restricted.length > 0) reasonLines.push(`${restricted.length} restricted image(s) removed`);
-  if (urlBlurred.length > 0) reasonLines.push(`${urlBlurred.length} image(s) had visible URLs and were blurred`);
+  if (restricted.length > 0) reasonLines.push(`${plural(restricted.length, 'restricted image', 'restricted images')} removed`);
+  if (urlBlurred.length > 0) reasonLines.push(`${plural(urlBlurred.length, 'image', 'images')} had a visible link and ${urlBlurred.length === 1 ? 'was' : 'were'} blurred`);
 
   await safeDelete(
     message,
-    `<@${message.author.id}> Original message removed (${reasonLines.join('; ')}).`
+    `<@${message.author.id}> Your original message was removed — ${reasonLines.join('; ')}.`
   );
 
   if (filesToRepost.length > 0) {
     const summary = [];
-    if (clean.length > 0) summary.push(`${clean.length} clean file(s)`);
-    if (urlBlurred.length > 0) summary.push(`${urlBlurred.length} blurred (URL hidden)`);
-    if (fullyBlurred.length > 0) summary.push(`${fullyBlurred.length} blurred`);
-    if (restricted.length > 0) summary.push(`${restricted.length} restricted file(s) removed`);
+    if (clean.length > 0) summary.push(plural(clean.length, 'clean image', 'clean images'));
+    if (urlBlurred.length > 0) summary.push(`${plural(urlBlurred.length, 'image', 'images')} blurred (link hidden)`);
+    if (fullyBlurred.length > 0) summary.push(`${plural(fullyBlurred.length, 'image', 'images')} blurred`);
+    if (restricted.length > 0) summary.push(`${plural(restricted.length, 'restricted image', 'restricted images')} removed`);
 
     const originalText = (message.content || '').replace(linkRegex, '[link removed]').trim();
-    const lines = [`<@${message.author.id}> Reposted: ${summary.join(', ')}.`];
+    const lines = [`<@${message.author.id}> Reposted on your behalf: ${summary.join(', ')}.`];
     if (originalText) lines.push(`> ${originalText.slice(0, 800)}`);
 
     const MAX_PER_MSG = 10;
