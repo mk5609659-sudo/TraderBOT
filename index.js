@@ -249,7 +249,7 @@ async function handleImageAttachments(message, attachments, linkDetected) {
 
   const reasonLines = [];
   if (linkDetected) reasonLines.push('your message contained a link');
-  if (restricted.length > 0) reasonLines.push(`${restricted.length} restricted image(s) removed: ${restricted.map((r) => r.name).join(', ')}`);
+  if (restricted.length > 0) reasonLines.push(`${restricted.length} restricted image(s) removed`);
   if (urlBlurred.length > 0) reasonLines.push(`${urlBlurred.length} image(s) had visible URLs and were blurred`);
 
   await safeDelete(
