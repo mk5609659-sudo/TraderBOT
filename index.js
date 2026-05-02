@@ -1454,19 +1454,24 @@ async function handleIgCommand(message, parts) {
 
   if (parts[0].toLowerCase() === '!set' && sub === 'monitor interval') {
     const currentMs = igMonitor.getCurrentIntervalMs();
-    const currentDisplay = currentMs >= 60000
-      ? `${currentMs / 60000}m`
-      : `${currentMs / 1000}s`;
+    const curSecs = Math.floor(currentMs / 1000);
+    const curMins = Math.floor(curSecs / 60);
+    const curRemSecs = curSecs % 60;
+    const currentDisplay = curMins > 0 && curRemSecs > 0
+      ? `${curMins}m ${curRemSecs}s`
+      : curMins > 0 ? `${curMins}m` : `${curSecs}s`;
 
     const prompt = await message.reply(
-      `⏱️ Current interval: **${currentDisplay}**\n\n` +
+      `⏱️ **Current interval: ${currentDisplay}**\n\n` +
       `How often should the bot check Instagram accounts?\n` +
-      `Reply with a time using **s** for seconds or **m** for minutes:\n` +
-      `\`10s\` = 10 seconds\n` +
-      `\`30s\` = 30 seconds\n` +
-      `\`1m\` = 1 minute\n` +
-      `\`5m\` = 5 minutes\n\n` +
-      `*(Minimum: 10s — only lowercase letters accepted)*`
+      `Reply using **m** for minutes and **s** for seconds (minutes must come first):\n\n` +
+      `\`10s\` → 10 seconds\n` +
+      `\`30s\` → 30 seconds\n` +
+      `\`1m\` → 1 minute\n` +
+      `\`5m\` → 5 minutes\n` +
+      `\`5m 30s\` → 5 minutes 30 seconds\n` +
+      `\`1m 10s\` → 1 minute 10 seconds\n\n` +
+      `*(Minimum: 10s — lowercase only, minutes must come before seconds)*`
     ).catch(() => null);
     if (!prompt) return;
 
@@ -1475,36 +1480,63 @@ async function handleIgCommand(message, parts) {
     try {
       collected = await message.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ['time'] });
     } catch {
-      await prompt.edit(`${prompt.content}\n\n❌ No response received — interval unchanged.`).catch(() => null);
+      await prompt.edit(`⏱️ **Current interval: ${currentDisplay}**\n\n❌ No response received — interval unchanged.`).catch(() => null);
       return;
     }
 
-    const input = collected.first().content.trim();
-    const match = input.match(/^(\d+)(s|m)$/);
-    if (!match) {
+    const userMsg = collected.first();
+    const input = userMsg.content.trim();
+
+    await userMsg.delete().catch(() => null);
+
+    const onlySeconds = input.match(/^(\d+)s$/);
+    const onlyMinutes = input.match(/^(\d+)m$/);
+    const minsAndSecs = input.match(/^(\d+)m\s+(\d+)s$/);
+    const wrongOrder = input.match(/^\d+s\s+\d+m/);
+
+    if (wrongOrder) {
       await prompt.edit(
-        `${prompt.content}\n\n❌ Invalid format. Use lowercase \`s\` for seconds or \`m\` for minutes (e.g. \`30s\` or \`2m\`).`
+        `⏱️ **Current interval: ${currentDisplay}**\n\n` +
+        `❌ Wrong order — minutes must come **before** seconds (e.g. \`5m 10s\`, not \`10s 5m\`).`
       ).catch(() => null);
       return;
     }
 
-    const value = parseInt(match[1], 10);
-    const unit = match[2];
-    const newMs = unit === 'm' ? value * 60 * 1000 : value * 1000;
-    const displayStr = unit === 'm'
-      ? `${value} minute${value !== 1 ? 's' : ''}`
-      : `${value} second${value !== 1 ? 's' : ''}`;
+    let totalMs = 0;
+    let displayStr = '';
 
-    const result = igMonitor.updateMonitorInterval(newMs);
+    if (minsAndSecs) {
+      const mins = parseInt(minsAndSecs[1], 10);
+      const secs = parseInt(minsAndSecs[2], 10);
+      totalMs = (mins * 60 + secs) * 1000;
+      displayStr = `${mins} minute${mins !== 1 ? 's' : ''} ${secs} second${secs !== 1 ? 's' : ''}`;
+    } else if (onlyMinutes) {
+      const mins = parseInt(onlyMinutes[1], 10);
+      totalMs = mins * 60 * 1000;
+      displayStr = `${mins} minute${mins !== 1 ? 's' : ''}`;
+    } else if (onlySeconds) {
+      const secs = parseInt(onlySeconds[1], 10);
+      totalMs = secs * 1000;
+      displayStr = `${secs} second${secs !== 1 ? 's' : ''}`;
+    } else {
+      await prompt.edit(
+        `⏱️ **Current interval: ${currentDisplay}**\n\n` +
+        `❌ Invalid format. Examples: \`30s\`, \`2m\`, \`5m 10s\` (lowercase only, minutes before seconds).`
+      ).catch(() => null);
+      return;
+    }
+
+    const result = igMonitor.updateMonitorInterval(totalMs);
     if (!result.success) {
       await prompt.edit(
-        `${prompt.content}\n\n❌ Minimum allowed interval is **${result.minMs / 1000} seconds**. Please try again.`
+        `⏱️ **Current interval: ${currentDisplay}**\n\n` +
+        `❌ Minimum allowed interval is **10 seconds**. \`${input}\` is too short — please try again.`
       ).catch(() => null);
       return;
     }
 
     await prompt.edit(
-      `✅ Monitoring interval updated to **${displayStr}**.\nThe bot will now check all Instagram accounts every ${displayStr}.`
+      `✅ **Monitoring interval updated to ${displayStr}.**\nThe bot will now check all Instagram accounts every ${displayStr}.`
     ).catch(() => null);
     return;
   }
