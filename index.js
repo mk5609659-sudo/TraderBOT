@@ -1262,7 +1262,7 @@ async function handleImageCommand(message) {
       await message.reply('Please attach an image to use the **Background Remover**.').catch(() => null);
       return true;
     }
-    const status = await message.reply('⏳ Removing background… this may take a moment on first run (model loading).').catch(() => null);
+    const status = await message.reply('🪄 **Background Remover** — Working, please wait…').catch(() => null);
     try {
       const buf    = await downloadBuffer(atts[0].url);
       const result = await imageEditor.removeBackground(buf);
@@ -1287,7 +1287,7 @@ async function handleImageCommand(message) {
     }
     const scaleArg = parseInt(parts[2]);
     const scale    = [2, 4].includes(scaleArg) ? scaleArg : 4;
-    const status   = await message.reply(`⏳ Upscaling image ${scale}×…`).catch(() => null);
+    const status   = await message.reply(`🔍 **Image Upscaler** — Working, please wait…`).catch(() => null);
     try {
       const buf    = await downloadBuffer(atts[0].url);
       const result = await imageEditor.upscaleImage(buf, scale);
@@ -1311,7 +1311,7 @@ async function handleImageCommand(message) {
       return true;
     }
     const prompt = parts.slice(2).join(' ').trim().toLowerCase();
-    const status = await message.reply('🔍 Analyzing image… detecting objects.').catch(() => null);
+    const status = await message.reply('🧹 **Object Remover** — Working, please wait…').catch(() => null);
     try {
       const buf     = await downloadBuffer(atts[0].url);
       const objects = await imageEditor.detectObjects(buf);
@@ -1388,7 +1388,7 @@ async function handleImageCommand(message) {
       ).catch(() => null);
       return true;
     }
-    const status = await message.reply('⏳ Detecting faces and swapping… this may take a moment on first run.').catch(() => null);
+    const status = await message.reply('🔄 **Face Changer** — Working, please wait…').catch(() => null);
     try {
       const [targetBuf, faceBuf] = await Promise.all([
         downloadBuffer(atts[0].url),
