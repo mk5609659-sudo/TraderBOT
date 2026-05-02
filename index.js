@@ -1205,7 +1205,7 @@ async function handleAdminCommand(message) {
   const parts = message.content.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const welcomeCommands = ['!setwelcome', '!setrules', '!setservername', '!testwelcome', '!disablewelcome', '!enablewelcome', '!welcomeinfo', '!welcomehelp'];
-  const igCommands = ['!ig', '!add', '!remove'];
+  const igCommands = ['!ig', '!add', '!remove', '!set'];
   const allCommands = [...welcomeCommands, ...igCommands, '!help'];
   if (!allCommands.includes(cmd)) return false;
 
@@ -1226,6 +1226,7 @@ async function handleAdminCommand(message) {
             '`!add ig monitor` — add a new Instagram account to monitor',
             '`!remove ig monitor` — remove a monitored account',
             '`!ig monitor info` — list all monitored accounts with status',
+            '`!set monitor interval` — change how often the bot checks accounts',
           ].join('\n'),
         },
         {
@@ -1251,7 +1252,7 @@ async function handleAdminCommand(message) {
     return true;
   }
 
-  if (cmd === '!ig' || cmd === '!add' || cmd === '!remove') {
+  if (cmd === '!ig' || cmd === '!add' || cmd === '!remove' || cmd === '!set') {
     await handleIgCommand(message, parts);
     return true;
   }
@@ -1451,11 +1452,69 @@ async function handleIgCommand(message, parts) {
     return;
   }
 
+  if (parts[0].toLowerCase() === '!set' && sub === 'monitor interval') {
+    const currentMs = igMonitor.getCurrentIntervalMs();
+    const currentDisplay = currentMs >= 60000
+      ? `${currentMs / 60000}m`
+      : `${currentMs / 1000}s`;
+
+    const prompt = await message.reply(
+      `⏱️ Current interval: **${currentDisplay}**\n\n` +
+      `How often should the bot check Instagram accounts?\n` +
+      `Reply with a time using **s** for seconds or **m** for minutes:\n` +
+      `\`10s\` = 10 seconds\n` +
+      `\`30s\` = 30 seconds\n` +
+      `\`1m\` = 1 minute\n` +
+      `\`5m\` = 5 minutes\n\n` +
+      `*(Minimum: 10s — only lowercase letters accepted)*`
+    ).catch(() => null);
+    if (!prompt) return;
+
+    const filter = (m) => m.author.id === message.author.id && m.channel.id === message.channel.id;
+    let collected;
+    try {
+      collected = await message.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ['time'] });
+    } catch {
+      await prompt.edit(`${prompt.content}\n\n❌ No response received — interval unchanged.`).catch(() => null);
+      return;
+    }
+
+    const input = collected.first().content.trim();
+    const match = input.match(/^(\d+)(s|m)$/);
+    if (!match) {
+      await prompt.edit(
+        `${prompt.content}\n\n❌ Invalid format. Use lowercase \`s\` for seconds or \`m\` for minutes (e.g. \`30s\` or \`2m\`).`
+      ).catch(() => null);
+      return;
+    }
+
+    const value = parseInt(match[1], 10);
+    const unit = match[2];
+    const newMs = unit === 'm' ? value * 60 * 1000 : value * 1000;
+    const displayStr = unit === 'm'
+      ? `${value} minute${value !== 1 ? 's' : ''}`
+      : `${value} second${value !== 1 ? 's' : ''}`;
+
+    const result = igMonitor.updateMonitorInterval(newMs);
+    if (!result.success) {
+      await prompt.edit(
+        `${prompt.content}\n\n❌ Minimum allowed interval is **${result.minMs / 1000} seconds**. Please try again.`
+      ).catch(() => null);
+      return;
+    }
+
+    await prompt.edit(
+      `✅ Monitoring interval updated to **${displayStr}**.\nThe bot will now check all Instagram accounts every ${displayStr}.`
+    ).catch(() => null);
+    return;
+  }
+
   await message.reply(
     '**Instagram Monitor commands** (admin only)\n' +
     '`!ig monitor info` — list all monitored accounts\n' +
     '`!add ig monitor` — add a new Instagram account to monitor\n' +
-    '`!remove ig monitor` — remove a monitored account'
+    '`!remove ig monitor` — remove a monitored account\n' +
+    '`!set monitor interval` — change how often the bot checks accounts'
   ).catch(() => null);
 }
 

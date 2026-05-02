@@ -4,8 +4,10 @@ const path = require('path');
 const { EmbedBuilder, PermissionsBitField, ChannelType } = require('discord.js');
 
 const DATA_FILE = path.join(__dirname, '..', 'ig_monitor_data.json');
-const MONITOR_INTERVAL_MS = 5 * 60 * 1000;
 const POSTS_PER_PAGE = 50;
+const MIN_INTERVAL_MS = 10 * 1000;
+
+let currentIntervalMs = 5 * 60 * 1000;
 
 const IG_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -17,6 +19,7 @@ const IG_HEADERS = {
 
 let monitorData = { accounts: {} };
 let monitorInterval = null;
+let monitorClient = null;
 
 async function loadData() {
   try {
@@ -433,10 +436,28 @@ async function runMonitorCycle(discordClient) {
 
 function startMonitoring(discordClient) {
   if (monitorInterval) return;
+  monitorClient = discordClient;
   monitorInterval = setInterval(() => {
     runMonitorCycle(discordClient).catch((e) => console.error('[ig] monitor cycle error:', e));
-  }, MONITOR_INTERVAL_MS);
-  console.log('[ig] monitoring started — interval: 5 minutes');
+  }, currentIntervalMs);
+  console.log(`[ig] monitoring started — interval: ${currentIntervalMs / 1000}s`);
 }
 
-module.exports = { loadData, addAccount, removeAccount, getGuildAccounts, startMonitoring, accountKey, monitorData };
+function updateMonitorInterval(newMs) {
+  if (newMs < MIN_INTERVAL_MS) return { success: false, reason: 'too_low', minMs: MIN_INTERVAL_MS };
+  currentIntervalMs = newMs;
+  if (monitorInterval) {
+    clearInterval(monitorInterval);
+    monitorInterval = setInterval(() => {
+      runMonitorCycle(monitorClient).catch((e) => console.error('[ig] monitor cycle error:', e));
+    }, currentIntervalMs);
+    console.log(`[ig] interval updated to ${currentIntervalMs / 1000}s`);
+  }
+  return { success: true };
+}
+
+function getCurrentIntervalMs() {
+  return currentIntervalMs;
+}
+
+module.exports = { loadData, addAccount, removeAccount, getGuildAccounts, startMonitoring, updateMonitorInterval, getCurrentIntervalMs, accountKey, monitorData };
