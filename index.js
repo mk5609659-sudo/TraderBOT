@@ -1205,7 +1205,7 @@ async function handleAdminCommand(message) {
   const parts = message.content.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const welcomeCommands = ['!setwelcome', '!setrules', '!setservername', '!testwelcome', '!disablewelcome', '!enablewelcome', '!welcomeinfo', '!welcomehelp'];
-  const igCommands = ['!ig', '!add'];
+  const igCommands = ['!ig', '!add', '!remove'];
   const allCommands = [...welcomeCommands, ...igCommands, '!help'];
   if (!allCommands.includes(cmd)) return false;
 
@@ -1224,6 +1224,7 @@ async function handleAdminCommand(message) {
           name: '📸 Instagram Monitor',
           value: [
             '`!add ig monitor` — add a new Instagram account to monitor',
+            '`!remove ig monitor` — remove a monitored account',
             '`!ig monitor info` — list all monitored accounts with status',
           ].join('\n'),
         },
@@ -1250,7 +1251,7 @@ async function handleAdminCommand(message) {
     return true;
   }
 
-  if (cmd === '!ig' || cmd === '!add') {
+  if (cmd === '!ig' || cmd === '!add' || cmd === '!remove') {
     await handleIgCommand(message, parts);
     return true;
   }
@@ -1393,10 +1394,68 @@ async function handleIgCommand(message, parts) {
     return;
   }
 
+  if (parts[0].toLowerCase() === '!remove' && sub === 'ig monitor') {
+    const accounts = igMonitor.getGuildAccounts(message.guild.id);
+    if (accounts.length === 0) {
+      await message.reply('There are no monitored Instagram accounts to remove.').catch(() => null);
+      return;
+    }
+
+    const list = accounts.map((a, i) => `**${i + 1}.** @${a.username}`).join('\n');
+    await message.reply(
+      `Which Instagram account do you want to remove? Reply with the **username**.\n\n${list}`
+    ).catch(() => null);
+
+    const filter = (m) => m.author.id === message.author.id && m.channel.id === message.channel.id;
+    let collected;
+    try {
+      collected = await message.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ['time'] });
+    } catch {
+      await message.channel.send(`<@${message.author.id}> No reply received — removal cancelled.`).catch(() => null);
+      return;
+    }
+
+    const usernameRaw = collected.first().content.trim().replace(/^@/, '').toLowerCase();
+    const match = accounts.find((a) => a.username.toLowerCase() === usernameRaw);
+    if (!match) {
+      await message.channel.send(`<@${message.author.id}> Account **@${usernameRaw}** is not in the monitored list.`).catch(() => null);
+      return;
+    }
+
+    const confirmMsg = await message.channel.send(
+      `Are you sure you want to remove **@${match.username}** from monitoring? Reply **yes** to confirm or anything else to cancel.`
+    ).catch(() => null);
+
+    let confirmed;
+    try {
+      confirmed = await message.channel.awaitMessages({ filter, max: 1, time: 20000, errors: ['time'] });
+    } catch {
+      await confirmMsg?.edit('Removal cancelled — no confirmation received.').catch(() => null);
+      return;
+    }
+
+    if (confirmed.first().content.trim().toLowerCase() !== 'yes') {
+      await message.channel.send('Removal cancelled.').catch(() => null);
+      return;
+    }
+
+    const result = await igMonitor.removeAccount(message.guild.id, match.username);
+    if (result.success) {
+      await message.channel.send(
+        `✅ **@${match.username}** has been removed from monitoring.\n` +
+        `The channel <#${result.channelId}> has been kept — delete it manually if you no longer need it.`
+      ).catch(() => null);
+    } else {
+      await message.channel.send(`❌ Could not remove **@${match.username}**: ${result.reason}`).catch(() => null);
+    }
+    return;
+  }
+
   await message.reply(
     '**Instagram Monitor commands** (admin only)\n' +
     '`!ig monitor info` — list all monitored accounts\n' +
-    '`!add ig monitor` — add a new Instagram account to monitor'
+    '`!add ig monitor` — add a new Instagram account to monitor\n' +
+    '`!remove ig monitor` — remove a monitored account'
   ).catch(() => null);
 }
 
