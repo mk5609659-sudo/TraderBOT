@@ -259,16 +259,17 @@ async function blazefaceAtScale(model, tf, imgBuf, meta, maxDim) {
 
 // ── Strategy 2: COCO-SSD person → face region heuristic ──────────────────────
 // When BlazeFace fails on full-body shots, the person bbox is reliable.
-// Face occupies roughly the top 20 % of a standing person's bbox.
+// Face is the top 14 % of the person height, capped at 200 px tall,
+// horizontally centred at 55 % of person width.
 async function detectFacesViaPerson(inputBuffer) {
   const objects = await detectObjects(inputBuffer);
   const persons = objects.filter(o => o.label === 'person');
   if (persons.length === 0) return [];
   return persons.map(p => {
-    const faceH = Math.max(10, Math.round(p.bbox.h * 0.20));
-    const faceW = Math.max(10, Math.round(p.bbox.w * 0.60));
+    const faceH = Math.min(200, Math.max(10, Math.round(p.bbox.h * 0.14)));
+    const faceW = Math.min(200, Math.max(10, Math.round(p.bbox.w * 0.55)));
     const faceX = p.bbox.x + Math.round((p.bbox.w - faceW) / 2);
-    const faceY = p.bbox.y;
+    const faceY = p.bbox.y + Math.round(p.bbox.h * 0.01); // tiny offset past head-top
     return { x: faceX, y: faceY, w: faceW, h: faceH };
   });
 }
@@ -301,6 +302,25 @@ async function detectFaces(inputBuffer) {
   return detectFacesViaPerson(inputBuffer);
 }
 
+// ── Per-channel colour/luminance matching ─────────────────────────────────────
+// Scales R, G, B channels of srcBuf so its average matches tgtBuf's average.
+// This corrects for lighting and skin-tone differences between the two photos.
+async function colourMatch(srcBuf, tgtBuf) {
+  const avg = async (buf) => {
+    const raw = await sharp(buf).resize(8, 8).removeAlpha().raw().toBuffer();
+    let r = 0, g = 0, b = 0;
+    for (let i = 0; i < raw.length; i += 3) { r += raw[i]; g += raw[i+1]; b += raw[i+2]; }
+    const n = raw.length / 3;
+    return { r: r / n, g: g / n, b: b / n };
+  };
+  const [sa, ta] = await Promise.all([avg(srcBuf), avg(tgtBuf)]);
+  const clamp = v => Math.min(3.0, Math.max(0.25, v));
+  const rS = clamp(sa.r > 2 ? ta.r / sa.r : 1);
+  const gS = clamp(sa.g > 2 ? ta.g / sa.g : 1);
+  const bS = clamp(sa.b > 2 ? ta.b / sa.b : 1);
+  return sharp(srcBuf).linear([rS, gS, bS], [0, 0, 0]).png().toBuffer();
+}
+
 async function swapFace(faceSourceBuffer, targetBuffer) {
   const [sourceFaces, targetFaces] = await Promise.all([
     detectFaces(faceSourceBuffer),
@@ -315,36 +335,47 @@ async function swapFace(faceSourceBuffer, targetBuffer) {
   const srcMeta = await sharp(faceSourceBuffer).metadata();
   const tgtMeta = await sharp(targetBuffer).metadata();
 
-  const srcPad = Math.round(Math.min(src.w, src.h) * 0.2);
+  // Source crop: generous padding to include forehead + chin + ears
+  const srcPad = Math.round(Math.min(src.w, src.h) * 0.25);
   const srcX   = Math.max(0, src.x - srcPad);
   const srcY   = Math.max(0, src.y - srcPad);
   const srcW   = Math.min(srcMeta.width  - srcX, src.w + srcPad * 2);
   const srcH   = Math.min(srcMeta.height - srcY, src.h + srcPad * 2);
 
-  const tgtPad = Math.round(Math.min(tgt.w, tgt.h) * 0.15);
+  // Target paste region: match same generous padding
+  const tgtPad = Math.round(Math.min(tgt.w, tgt.h) * 0.25);
   const tgtX   = Math.max(0, tgt.x - tgtPad);
   const tgtY   = Math.max(0, tgt.y - tgtPad);
   const tgtW   = Math.min(tgtMeta.width  - tgtX, tgt.w + tgtPad * 2);
   const tgtH   = Math.min(tgtMeta.height - tgtY, tgt.h + tgtPad * 2);
 
+  // Extract and resize source face to match target face region exactly
   const extractedFace = await sharp(faceSourceBuffer)
     .extract({ left: srcX, top: srcY, width: Math.max(1, srcW), height: Math.max(1, srcH) })
     .resize(Math.max(1, tgtW), Math.max(1, tgtH), { kernel: sharp.kernel.lanczos3 })
     .png()
     .toBuffer();
 
-  // Soft elliptical feather mask for natural blending
+  // Extract target face region for colour reference
+  const targetFaceRegion = await sharp(targetBuffer)
+    .extract({ left: tgtX, top: tgtY, width: Math.max(1, tgtW), height: Math.max(1, tgtH) })
+    .png().toBuffer();
+
+  // Match lighting / skin tone of source face to target face
+  const colourMatchedFace = await colourMatch(extractedFace, targetFaceRegion);
+
+  // Elliptical feather mask — fade starts at 35 % radius so edges are very soft
   const maskSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${tgtW}" height="${tgtH}">
     <defs>
-      <radialGradient id="g" cx="50%" cy="44%" rx="44%" ry="46%">
-        <stop offset="55%" stop-color="white" stop-opacity="1"/>
+      <radialGradient id="g" cx="50%" cy="44%" rx="46%" ry="48%">
+        <stop offset="35%" stop-color="white" stop-opacity="1"/>
         <stop offset="100%" stop-color="white" stop-opacity="0"/>
       </radialGradient>
     </defs>
-    <ellipse cx="${tgtW / 2}" cy="${tgtH * 0.44}" rx="${tgtW * 0.44}" ry="${tgtH * 0.46}" fill="url(#g)"/>
+    <ellipse cx="${tgtW/2}" cy="${tgtH*0.44}" rx="${tgtW*0.46}" ry="${tgtH*0.48}" fill="url(#g)"/>
   </svg>`;
 
-  const maskedFace = await sharp(extractedFace)
+  const maskedFace = await sharp(colourMatchedFace)
     .composite([{ input: Buffer.from(maskSvg), blend: 'dest-in' }])
     .png()
     .toBuffer();
