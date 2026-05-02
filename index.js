@@ -1206,10 +1206,47 @@ async function handleAdminCommand(message) {
   const cmd = parts[0].toLowerCase();
   const welcomeCommands = ['!setwelcome', '!setrules', '!setservername', '!testwelcome', '!disablewelcome', '!enablewelcome', '!welcomeinfo', '!welcomehelp'];
   const igCommands = ['!ig', '!add'];
-  if (!welcomeCommands.includes(cmd) && !igCommands.includes(cmd)) return false;
+  const allCommands = [...welcomeCommands, ...igCommands, '!help'];
+  if (!allCommands.includes(cmd)) return false;
 
   if (!isAdmin(message.member)) {
     await message.reply('You need Administrator or Manage Server permission to use this command.').catch(() => null);
+    return true;
+  }
+
+  if (cmd === '!help') {
+    const embed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle('TraderBOT — Command Reference')
+      .setDescription('All commands are restricted to admins and server owner.')
+      .addFields(
+        {
+          name: '📸 Instagram Monitor',
+          value: [
+            '`!add ig monitor` — add a new Instagram account to monitor',
+            '`!ig monitor info` — list all monitored accounts with status',
+          ].join('\n'),
+        },
+        {
+          name: '👋 Welcome System',
+          value: [
+            '`!setwelcome [#channel]` — set the welcome channel (defaults to current)',
+            '`!setrules #channel` — set the rules channel shown in welcome messages',
+            '`!setservername <name>` — set the name shown on the welcome banner',
+            '`!enablewelcome` — turn welcome messages on',
+            '`!disablewelcome` — turn welcome messages off',
+            '`!testwelcome` — preview the welcome message using yourself',
+            '`!welcomeinfo` — show current welcome settings',
+          ].join('\n'),
+        },
+        {
+          name: '❓ Help',
+          value: '`!help` — show this command list',
+        }
+      )
+      .setFooter({ text: 'TraderBOT • Admin only' })
+      .setTimestamp();
+    await message.reply({ embeds: [embed] }).catch(() => null);
     return true;
   }
 
