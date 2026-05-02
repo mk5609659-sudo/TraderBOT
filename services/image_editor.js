@@ -302,6 +302,37 @@ async function detectFaces(inputBuffer) {
   return detectFacesViaPerson(inputBuffer);
 }
 
+// ── Face validation — reject BlazeFace false positives ───────────────────────
+// BlazeFace sometimes detects "faces" in background reflections, windows, etc.
+// We cross-check: a face bbox centre must lie inside a COCO-SSD person bbox.
+// If none of the detected faces overlap any person, discard them and use the
+// person-heuristic directly.
+async function validateFaces(faces, inputBuffer) {
+  if (faces.length === 0) return faces;
+
+  const objects = await detectObjects(inputBuffer);
+  const persons = objects.filter(o => o.label === 'person');
+  if (persons.length === 0) return faces; // can't validate — trust BlazeFace
+
+  const faceInPerson = (f, p) => {
+    const cx = f.x + f.w / 2;
+    const cy = f.y + f.h / 2;
+    return cx >= p.bbox.x && cx <= p.bbox.x + p.bbox.w &&
+           cy >= p.bbox.y && cy <= p.bbox.y + p.bbox.h;
+  };
+
+  // Pick only faces whose centre sits inside some person bbox
+  const valid = faces.filter(f => persons.some(p => faceInPerson(f, p)));
+  if (valid.length > 0) {
+    // Sort by face area descending — prefer the largest (most prominent) face
+    return valid.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+  }
+
+  // Every BlazeFace detection was a false positive — use person heuristic
+  console.log('[image-editor] all BlazeFace hits were false positives — using person fallback');
+  return detectFacesViaPerson(inputBuffer);
+}
+
 // ── Per-channel colour/luminance matching ─────────────────────────────────────
 // Scales R, G, B channels of srcBuf so its average matches tgtBuf's average.
 // This corrects for lighting and skin-tone differences between the two photos.
@@ -322,9 +353,14 @@ async function colourMatch(srcBuf, tgtBuf) {
 }
 
 async function swapFace(faceSourceBuffer, targetBuffer) {
-  const [sourceFaces, targetFaces] = await Promise.all([
+  // Detect then validate — rejects false positives from background reflections/windows
+  const [rawSrc, rawTgt] = await Promise.all([
     detectFaces(faceSourceBuffer),
     detectFaces(targetBuffer),
+  ]);
+  const [sourceFaces, targetFaces] = await Promise.all([
+    validateFaces(rawSrc, faceSourceBuffer),
+    validateFaces(rawTgt, targetBuffer),
   ]);
 
   if (sourceFaces.length === 0) throw new Error('No face detected in the **face image** (second attachment).');
@@ -364,11 +400,12 @@ async function swapFace(faceSourceBuffer, targetBuffer) {
   // Match lighting / skin tone of source face to target face
   const colourMatchedFace = await colourMatch(extractedFace, targetFaceRegion);
 
-  // Elliptical feather mask — fade starts at 35 % radius so edges are very soft
+  // Elliptical feather mask — core face (eyes/nose/mouth) is fully opaque,
+  // only the outer 30 % of the ellipse fades to transparent for edge blending
   const maskSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${tgtW}" height="${tgtH}">
     <defs>
       <radialGradient id="g" cx="50%" cy="44%" rx="46%" ry="48%">
-        <stop offset="35%" stop-color="white" stop-opacity="1"/>
+        <stop offset="65%" stop-color="white" stop-opacity="1"/>
         <stop offset="100%" stop-color="white" stop-opacity="0"/>
       </radialGradient>
     </defs>
