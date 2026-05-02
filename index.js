@@ -1286,7 +1286,7 @@ async function handleImageCommand(message) {
       imageAtts = await waitForImages(message, '🪄 Background Remover', 1);
       if (!imageAtts) return true;
     }
-    const status = await message.reply('🪄 **Background Remover** — Working, please wait…').catch(() => null);
+    const status = await message.reply('🪄 **Background Remover** — Working, please wait…\n_First use takes 2–4 min (AI model loading). After that: ~20 sec._').catch(() => null);
     try {
       const buf    = await downloadBuffer(imageAtts[0].url);
       const result = await imageEditor.removeBackground(buf);
@@ -1312,7 +1312,7 @@ async function handleImageCommand(message) {
     }
     const scaleArg = parseInt(parts[2]);
     const scale    = [2, 4].includes(scaleArg) ? scaleArg : 4;
-    const status   = await message.reply(`🔍 **Image Upscaler** — Working, please wait…`).catch(() => null);
+    const status   = await message.reply(`🔍 **Image Upscaler** — Working, please wait…\n_Usually done in 5–15 sec._`).catch(() => null);
     try {
       const buf          = await downloadBuffer(imageAtts[0].url);
       const { buf: out, ext } = await imageEditor.upscaleImage(buf, scale);
@@ -1337,7 +1337,7 @@ async function handleImageCommand(message) {
       if (!imageAtts) return true;
     }
     const prompt = parts.slice(2).join(' ').trim().toLowerCase();
-    const status = await message.reply('🧹 **Object Remover** — Working, please wait…').catch(() => null);
+    const status = await message.reply('🧹 **Object Remover** — Working, please wait…\n_First use takes 2–4 min (AI model loading). After that: ~30 sec._').catch(() => null);
     try {
       const buf     = await downloadBuffer(imageAtts[0].url);
       const objects = await imageEditor.detectObjects(buf);
@@ -1420,7 +1420,7 @@ async function handleImageCommand(message) {
       if (!extra) return true;
       imageAtts = [...imageAtts, ...extra].slice(0, 2);
     }
-    const status = await message.reply('🔄 **Face Changer** — Working, please wait…').catch(() => null);
+    const status = await message.reply('🔄 **Face Changer** — Working, please wait…\n_First use takes 2–4 min (AI model loading). After that: ~30 sec._').catch(() => null);
     try {
       const [targetBuf, faceBuf] = await Promise.all([
         downloadBuffer(imageAtts[0].url),
