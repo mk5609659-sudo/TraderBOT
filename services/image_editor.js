@@ -100,10 +100,11 @@ async function detectObjects(inputBuffer) {
   }));
 }
 
-// ─── Object Removal (strip-based fill) ────────────────────────────────────────
-// Fix: instead of blurring the area (which leaves an obvious smear), we clone
-// the adjacent strip that has the most background context and stretch it to
-// fill the gap.  This makes the removal look like the object was never there.
+// ─── Object Removal (gradient-blend fill) ────────────────────────────────────
+// Collects strips from all available sides, then blends them with SVG gradient
+// masks so the fill transitions smoothly from surrounding context.
+// Top+bottom: sky fades into ground.  Left+right: left side fades into right.
+// This removes the visible stretching artifacts of the single-strip approach.
 async function inpaintRegion(inputBuffer, { x, y, w, h }) {
   const meta = await sharp(inputBuffer).metadata();
   x = Math.max(0, x);
@@ -112,62 +113,80 @@ async function inpaintRegion(inputBuffer, { x, y, w, h }) {
   h = Math.min(h, meta.height - y);
   if (w <= 0 || h <= 0) return inputBuffer;
 
-  // Strip thickness: 25 % of bbox dimension or at least 20 px
-  const sw = Math.max(20, Math.round(w * 0.25));
-  const sh = Math.max(20, Math.round(h * 0.25));
+  const sh = Math.max(25, Math.round(h * 0.30));
+  const sw = Math.max(25, Math.round(w * 0.30));
 
-  const strips = [];
+  // Collect all available surrounding strips scaled to bbox size
+  const s = {};
+  if (y >= sh)
+    s.top = await sharp(inputBuffer)
+      .extract({ left: x, top: Math.max(0, y - sh), width: w, height: sh })
+      .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 }).png().toBuffer();
+  if (y + h + sh <= meta.height)
+    s.bot = await sharp(inputBuffer)
+      .extract({ left: x, top: y + h, width: w, height: Math.min(sh, meta.height - y - h) })
+      .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 }).png().toBuffer();
+  if (x >= sw)
+    s.left = await sharp(inputBuffer)
+      .extract({ left: Math.max(0, x - sw), top: y, width: sw, height: h })
+      .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 }).png().toBuffer();
+  if (x + w + sw <= meta.width)
+    s.right = await sharp(inputBuffer)
+      .extract({ left: x + w, top: y, width: Math.min(sw, meta.width - x - w), height: h })
+      .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 }).png().toBuffer();
 
-  // Left strip — scaled to fill the bbox
-  if (x >= sw) {
-    strips.push({
-      weight: x, // more room → prefer it
-      buf: await sharp(inputBuffer)
-        .extract({ left: x - sw, top: y, width: sw, height: h })
-        .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 })
-        .png().toBuffer(),
-    });
-  }
-  // Right strip
-  if (x + w + sw <= meta.width) {
-    strips.push({
-      weight: meta.width - (x + w),
-      buf: await sharp(inputBuffer)
-        .extract({ left: x + w, top: y, width: sw, height: h })
-        .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 })
-        .png().toBuffer(),
-    });
-  }
-  // Top strip
-  if (y >= sh) {
-    strips.push({
-      weight: y,
-      buf: await sharp(inputBuffer)
-        .extract({ left: x, top: y - sh, width: w, height: sh })
-        .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 })
-        .png().toBuffer(),
-    });
-  }
-  // Bottom strip
-  if (y + h + sh <= meta.height) {
-    strips.push({
-      weight: meta.height - (y + h),
-      buf: await sharp(inputBuffer)
-        .extract({ left: x, top: y + h, width: w, height: sh })
-        .resize(w, h, { fit: 'fill', kernel: sharp.kernel.lanczos3 })
-        .png().toBuffer(),
-    });
-  }
+  const keys = Object.keys(s);
+  if (keys.length === 0) return blurFill(inputBuffer, { x, y, w, h, meta });
 
-  if (strips.length === 0) {
-    // Last resort: simple blur fill
-    return blurFill(inputBuffer, { x, y, w, h, meta });
-  }
+  let fill;
 
-  // Use the strip with the most background context around it
-  strips.sort((a, b) => b.weight - a.weight);
-  // Apply a very soft blur (sigma=1) to the fill so edges blend naturally
-  const fill = await sharp(strips[0].buf).blur(1).png().toBuffer();
+  if (s.top && s.bot) {
+    // Blend: top strip fades out going down, bottom strip fades out going up
+    // Result: smooth vertical gradient from surrounding context
+    const topMask = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="white" stop-opacity="1"/>
+        <stop offset="100%" stop-color="white" stop-opacity="0"/>
+      </linearGradient></defs>
+      <rect width="${w}" height="${h}" fill="url(#g)"/>
+    </svg>`;
+    const maskedTop = await sharp(s.top)
+      .composite([{ input: Buffer.from(topMask), blend: 'dest-in' }]).png().toBuffer();
+    fill = await sharp(s.bot)
+      .composite([{ input: maskedTop, blend: 'over' }]).blur(1.5).png().toBuffer();
+
+  } else if (s.left && s.right) {
+    // Horizontal gradient blend
+    const leftMask = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0%" stop-color="white" stop-opacity="1"/>
+        <stop offset="100%" stop-color="white" stop-opacity="0"/>
+      </linearGradient></defs>
+      <rect width="${w}" height="${h}" fill="url(#g)"/>
+    </svg>`;
+    const maskedLeft = await sharp(s.left)
+      .composite([{ input: Buffer.from(leftMask), blend: 'dest-in' }]).png().toBuffer();
+    fill = await sharp(s.right)
+      .composite([{ input: maskedLeft, blend: 'over' }]).blur(1.5).png().toBuffer();
+
+  } else if (s.top && s.left) {
+    // Blend top+left with diagonal gradient
+    const mask = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="white" stop-opacity="1"/>
+        <stop offset="100%" stop-color="white" stop-opacity="0"/>
+      </linearGradient></defs>
+      <rect width="${w}" height="${h}" fill="url(#g)"/>
+    </svg>`;
+    const maskedTop = await sharp(s.top)
+      .composite([{ input: Buffer.from(mask), blend: 'dest-in' }]).png().toBuffer();
+    fill = await sharp(s.left)
+      .composite([{ input: maskedTop, blend: 'over' }]).blur(1.5).png().toBuffer();
+
+  } else {
+    // Single strip available — use it with soft edge blur
+    fill = await sharp(s[keys[0]]).blur(1.5).png().toBuffer();
+  }
 
   return sharp(inputBuffer)
     .composite([{ input: fill, left: x, top: y }])
@@ -213,43 +232,73 @@ async function loadBlazeface() {
   return _blazeModel;
 }
 
-// Fix: try multiple input scales (128 → 256 → 512 px) so faces that are
-// small relative to the image are still found.
+// ── Strategy 1: BlazeFace at multiple scales ──────────────────────────────────
+async function blazefaceAtScale(model, tf, imgBuf, meta, maxDim) {
+  const scale = Math.min(maxDim / meta.width, maxDim / meta.height, 1);
+  const resW  = Math.max(1, Math.round(meta.width  * scale));
+  const resH  = Math.max(1, Math.round(meta.height * scale));
+
+  const { data } = await sharp(imgBuf)
+    .resize(resW, resH).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+
+  const tensor = tf.tensor3d(new Uint8Array(data), [resH, resW, 3]);
+  const preds  = await model.estimateFaces(tensor, false);
+  tensor.dispose();
+
+  return preds.map(p => {
+    const tl = Array.isArray(p.topLeft)     ? p.topLeft     : Array.from(p.topLeft);
+    const br = Array.isArray(p.bottomRight) ? p.bottomRight : Array.from(p.bottomRight);
+    return {
+      x: Math.max(0, Math.round(tl[0] / scale)),
+      y: Math.max(0, Math.round(tl[1] / scale)),
+      w: Math.max(1, Math.round((br[0] - tl[0]) / scale)),
+      h: Math.max(1, Math.round((br[1] - tl[1]) / scale)),
+    };
+  });
+}
+
+// ── Strategy 2: COCO-SSD person → face region heuristic ──────────────────────
+// When BlazeFace fails on full-body shots, the person bbox is reliable.
+// Face occupies roughly the top 20 % of a standing person's bbox.
+async function detectFacesViaPerson(inputBuffer) {
+  const objects = await detectObjects(inputBuffer);
+  const persons = objects.filter(o => o.label === 'person');
+  if (persons.length === 0) return [];
+  return persons.map(p => {
+    const faceH = Math.max(10, Math.round(p.bbox.h * 0.20));
+    const faceW = Math.max(10, Math.round(p.bbox.w * 0.60));
+    const faceX = p.bbox.x + Math.round((p.bbox.w - faceW) / 2);
+    const faceY = p.bbox.y;
+    return { x: faceX, y: faceY, w: faceW, h: faceH };
+  });
+}
+
 async function detectFaces(inputBuffer) {
   const model = await loadBlazeface();
   const tf    = await getTf();
   const meta  = await sharp(inputBuffer).metadata();
 
-  for (const maxDim of [128, 256, 512]) {
-    const scale = Math.min(maxDim / meta.width, maxDim / meta.height, 1);
-    const resW  = Math.max(1, Math.round(meta.width  * scale));
-    const resH  = Math.max(1, Math.round(meta.height * scale));
-
-    const { data } = await sharp(inputBuffer)
-      .resize(resW, resH)
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    const tensor = tf.tensor3d(new Uint8Array(data), [resH, resW, 3]);
-    const preds  = await model.estimateFaces(tensor, false);
-    tensor.dispose();
-
-    if (preds.length > 0) {
-      return preds.map(p => {
-        const tl = Array.isArray(p.topLeft)     ? p.topLeft     : Array.from(p.topLeft);
-        const br = Array.isArray(p.bottomRight) ? p.bottomRight : Array.from(p.bottomRight);
-        return {
-          x: Math.max(0, Math.round(tl[0] / scale)),
-          y: Math.max(0, Math.round(tl[1] / scale)),
-          w: Math.max(1, Math.round((br[0] - tl[0]) / scale)),
-          h: Math.max(1, Math.round((br[1] - tl[1]) / scale)),
-        };
-      });
-    }
+  // Try BlazeFace at increasing resolutions (higher res finds smaller faces)
+  for (const maxDim of [256, 384, 512, 640]) {
+    const faces = await blazefaceAtScale(model, tf, inputBuffer, meta, maxDim);
+    if (faces.length > 0) return faces;
   }
 
-  return [];
+  // BlazeFace missed every scale — try top 55 % crop (face is usually there
+  // in portrait/full-body shots where the head is at the top)
+  const cropH   = Math.max(50, Math.round(meta.height * 0.55));
+  const topCrop = await sharp(inputBuffer)
+    .extract({ left: 0, top: 0, width: meta.width, height: cropH }).png().toBuffer();
+  const cropMeta = { width: meta.width, height: cropH };
+
+  for (const maxDim of [384, 512]) {
+    const faces = await blazefaceAtScale(model, tf, topCrop, cropMeta, maxDim);
+    if (faces.length > 0) return faces; // coords already in original-image space
+  }
+
+  // Final fallback: infer face position from COCO-SSD person bounding box
+  console.log('[image-editor] BlazeFace found nothing — falling back to person bbox');
+  return detectFacesViaPerson(inputBuffer);
 }
 
 async function swapFace(faceSourceBuffer, targetBuffer) {
