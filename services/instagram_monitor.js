@@ -460,4 +460,26 @@ function getCurrentIntervalMs() {
   return currentIntervalMs;
 }
 
-module.exports = { loadData, addAccount, removeAccount, getGuildAccounts, startMonitoring, updateMonitorInterval, getCurrentIntervalMs, accountKey, monitorData };
+function pauseMonitoring() {
+  if (!monitorInterval) return false;
+  clearInterval(monitorInterval);
+  monitorInterval = null;
+  console.log('[ig] monitoring paused.');
+  return true;
+}
+
+function resumeMonitoring() {
+  if (monitorInterval) return false;
+  if (!monitorClient) return false;
+  monitorInterval = setInterval(() => {
+    runMonitorCycle(monitorClient).catch((e) => console.error('[ig] monitor cycle error:', e));
+  }, currentIntervalMs);
+  console.log(`[ig] monitoring resumed — interval: ${currentIntervalMs / 1000}s`);
+  return true;
+}
+
+function isMonitoringActive() {
+  return monitorInterval !== null;
+}
+
+module.exports = { loadData, addAccount, removeAccount, getGuildAccounts, startMonitoring, updateMonitorInterval, getCurrentIntervalMs, pauseMonitoring, resumeMonitoring, isMonitoringActive, accountKey, monitorData };

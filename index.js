@@ -1205,7 +1205,7 @@ async function handleAdminCommand(message) {
   const parts = message.content.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const welcomeCommands = ['!setwelcome', '!setrules', '!setservername', '!testwelcome', '!disablewelcome', '!enablewelcome', '!welcomeinfo', '!welcomehelp'];
-  const igCommands = ['!ig', '!add', '!remove', '!set'];
+  const igCommands = ['!ig', '!add', '!remove', '!set', '!monitor'];
   const allCommands = [...welcomeCommands, ...igCommands, '!help'];
   if (!allCommands.includes(cmd)) return false;
 
@@ -1227,6 +1227,7 @@ async function handleAdminCommand(message) {
             '`!remove ig monitor` — remove a monitored account',
             '`!ig monitor info` — list all monitored accounts with status',
             '`!set monitor interval` — change how often the bot checks accounts',
+            '`!monitor on` / `!monitor off` — pause or resume the monitoring service',
           ].join('\n'),
         },
         {
@@ -1252,7 +1253,7 @@ async function handleAdminCommand(message) {
     return true;
   }
 
-  if (cmd === '!ig' || cmd === '!add' || cmd === '!remove' || cmd === '!set') {
+  if (cmd === '!ig' || cmd === '!add' || cmd === '!remove' || cmd === '!set' || cmd === '!monitor') {
     await handleIgCommand(message, parts);
     return true;
   }
@@ -1541,12 +1542,57 @@ async function handleIgCommand(message, parts) {
     return;
   }
 
+  if (parts[0].toLowerCase() === '!monitor') {
+    const action = parts[1]?.toLowerCase();
+
+    if (action === 'off') {
+      const wasActive = igMonitor.pauseMonitoring();
+      if (!wasActive) {
+        await message.reply('⏸️ Monitoring is **already off**.').catch(() => null);
+      } else {
+        await message.reply('🔴 **Monitoring turned OFF.** The bot will stop checking Instagram accounts until you turn it back on.').catch(() => null);
+      }
+      return;
+    }
+
+    if (action === 'on') {
+      const wasResumed = igMonitor.resumeMonitoring();
+      if (!wasResumed) {
+        const active = igMonitor.isMonitoringActive();
+        if (active) {
+          await message.reply('▶️ Monitoring is **already on**.').catch(() => null);
+        } else {
+          await message.reply('❌ Could not resume — no client available. Try restarting the bot.').catch(() => null);
+        }
+      } else {
+        const ms = igMonitor.getCurrentIntervalMs();
+        const secs = Math.floor(ms / 1000);
+        const mins = Math.floor(secs / 60);
+        const remSecs = secs % 60;
+        const intervalDisplay = mins > 0 && remSecs > 0
+          ? `${mins}m ${remSecs}s`
+          : mins > 0 ? `${mins}m` : `${secs}s`;
+        await message.reply(`🟢 **Monitoring turned ON.** The bot will check all accounts every **${intervalDisplay}**.`).catch(() => null);
+      }
+      return;
+    }
+
+    const status = igMonitor.isMonitoringActive() ? '🟢 **ON**' : '🔴 **OFF**';
+    await message.reply(
+      `Monitoring is currently ${status}.\n\n` +
+      '`!monitor on` — resume monitoring\n' +
+      '`!monitor off` — pause monitoring'
+    ).catch(() => null);
+    return;
+  }
+
   await message.reply(
     '**Instagram Monitor commands** (admin only)\n' +
     '`!ig monitor info` — list all monitored accounts\n' +
     '`!add ig monitor` — add a new Instagram account to monitor\n' +
     '`!remove ig monitor` — remove a monitored account\n' +
-    '`!set monitor interval` — change how often the bot checks accounts'
+    '`!set monitor interval` — change how often the bot checks accounts\n' +
+    '`!monitor on` / `!monitor off` — pause or resume the monitoring service'
   ).catch(() => null);
 }
 
