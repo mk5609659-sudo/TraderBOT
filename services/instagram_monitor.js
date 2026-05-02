@@ -78,13 +78,28 @@ async function buildAdminOverwrites(guild) {
   return overwrites;
 }
 
-function buildProfileEmbed(user) {
+async function fetchProfilePicBuffer(user) {
+  const picUrl = user.profile_pic_url_hd || user.profile_pic_url;
+  if (!picUrl) return null;
+  try {
+    const res = await axios.get(picUrl, {
+      headers: { ...IG_HEADERS, Referer: 'https://www.instagram.com/' },
+      responseType: 'arraybuffer',
+      timeout: 10000,
+    });
+    return Buffer.from(res.data);
+  } catch (e) {
+    console.warn('[ig] could not download profile pic:', e.message);
+    return null;
+  }
+}
+
+function buildProfileEmbed(user, hasPic = false) {
   const accountType = user.is_private ? '🔒 Private' : '🌐 Public';
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(0xe1306c)
     .setTitle(`@${user.username}`)
     .setURL(`https://www.instagram.com/${user.username}/`)
-    .setThumbnail(user.profile_pic_url_hd || user.profile_pic_url)
     .addFields(
       { name: 'Name', value: user.full_name || 'N/A', inline: true },
       { name: 'Account Type', value: accountType, inline: true },
@@ -96,6 +111,16 @@ function buildProfileEmbed(user) {
     )
     .setFooter({ text: 'Instagram Monitor' })
     .setTimestamp();
+  if (hasPic) embed.setThumbnail('attachment://profile.jpg');
+  return embed;
+}
+
+async function sendProfileMessage(channel, label, user) {
+  const picBuf = await fetchProfilePicBuffer(user);
+  const embed = buildProfileEmbed(user, !!picBuf);
+  const payload = { content: label, embeds: [embed] };
+  if (picBuf) payload.files = [{ attachment: picBuf, name: 'profile.jpg' }];
+  await channel.send(payload);
 }
 
 function buildPostEmbed(node, username) {
@@ -175,7 +200,7 @@ async function addAccount(guildId, username, discordClient) {
   };
   await saveData();
 
-  await channel.send({ content: '📊 **Account connected — current profile:**', embeds: [buildProfileEmbed(profile)] });
+  await sendProfileMessage(channel, '📊 **Account connected — current profile:**', profile);
 
   if (profile.is_private) {
     await channel.send('🔒 This account is **private**. Posts will not be fetched until it becomes public.');
