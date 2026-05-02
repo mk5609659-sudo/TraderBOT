@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Events } = require('discord.js');
+const { Client, GatewayIntentBits, Events, EmbedBuilder, PermissionsBitField, ChannelType } = require('discord.js');
 const { joinVoiceChannel, getVoiceConnection, EndBehaviorType, createAudioPlayer, createAudioResource, StreamType, NoSubscriberBehavior, AudioPlayerStatus } = require('@discordjs/voice');
 const { Readable } = require('stream');
 const prism = require('prism-media');
@@ -15,6 +15,8 @@ const config = require('./config.json');
 if (process.env.DISCORD_TOKEN) {
   config.token = process.env.DISCORD_TOKEN;
 }
+
+const igMonitor = require('./services/instagram_monitor');
 const linkRegex = /(https?:\/\/[^\s]+)/i;
 
 const WELCOME_FILE = './welcome.json';
@@ -62,6 +64,7 @@ async function main() {
   await ensureFolders();
   restrictedWords = await loadRestrictedWords();
   await loadWelcomeConfig();
+  await igMonitor.loadData();
   startControlWebServer();
   if (!config.token || config.token === 'YOUR_DISCORD_BOT_TOKEN_HERE') {
     throw new Error('Discord bot token is missing. Set the DISCORD_TOKEN secret or add it to config.json.');
@@ -97,6 +100,7 @@ async function loadRestrictedWords() {
 
 client.on(Events.ClientReady, () => {
   console.log(`Bot ready: ${client.user.tag}`);
+  igMonitor.startMonitoring(client);
 });
 
 client.on('error', (error) => {
@@ -1201,10 +1205,16 @@ async function handleAdminCommand(message) {
   const parts = message.content.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const welcomeCommands = ['!setwelcome', '!setrules', '!setservername', '!testwelcome', '!disablewelcome', '!enablewelcome', '!welcomeinfo', '!welcomehelp'];
-  if (!welcomeCommands.includes(cmd)) return false;
+  const igCommands = ['!ig', '!add'];
+  if (!welcomeCommands.includes(cmd) && !igCommands.includes(cmd)) return false;
 
   if (!isAdmin(message.member)) {
     await message.reply('You need Administrator or Manage Server permission to use this command.').catch(() => null);
+    return true;
+  }
+
+  if (cmd === '!ig' || cmd === '!add') {
+    await handleIgCommand(message, parts);
     return true;
   }
 
@@ -1284,6 +1294,73 @@ async function handleAdminCommand(message) {
     }
   }
   return false;
+}
+
+async function handleIgCommand(message, parts) {
+  const sub = parts.slice(1).map((p) => p.toLowerCase()).join(' ');
+
+  if (parts[0].toLowerCase() === '!ig' && sub === 'monitor info') {
+    const accounts = igMonitor.getGuildAccounts(message.guild.id);
+    if (accounts.length === 0) {
+      await message.reply('No Instagram accounts are being monitored yet. Use `!add ig monitor` to add one.').catch(() => null);
+      return;
+    }
+    const embed = new EmbedBuilder()
+      .setColor(0xe1306c)
+      .setTitle('Instagram Monitor — Accounts')
+      .setDescription(
+        accounts
+          .map((a, i) => {
+            const status = a.enabled ? '🟢 Enabled' : '🔴 Disabled';
+            const privacy = a.isPrivate ? '🔒 Private' : '🌐 Public';
+            return `**${i + 1}. @${a.username}**\nStatus: ${status} | ${privacy} | <#${a.channelId}>`;
+          })
+          .join('\n\n')
+      )
+      .setFooter({ text: `${accounts.length} account(s) monitored` })
+      .setTimestamp();
+    await message.reply({ embeds: [embed] }).catch(() => null);
+    return;
+  }
+
+  if (parts[0].toLowerCase() === '!add' && sub === 'ig monitor') {
+    const ask = await message.reply('Please reply with the **Instagram username** you want to monitor (just the username, no @).').catch(() => null);
+    if (!ask) return;
+
+    const filter = (m) => m.author.id === message.author.id && m.channel.id === message.channel.id;
+    let collected;
+    try {
+      collected = await message.channel.awaitMessages({ filter, max: 1, time: 30000, errors: ['time'] });
+    } catch {
+      await message.channel.send(`<@${message.author.id}> No username provided — request timed out.`).catch(() => null);
+      return;
+    }
+
+    const usernameRaw = collected.first().content.trim().replace(/^@/, '');
+    if (!usernameRaw || usernameRaw.includes(' ')) {
+      await message.channel.send(`<@${message.author.id}> That doesn't look like a valid Instagram username.`).catch(() => null);
+      return;
+    }
+
+    const checkMsg = await message.channel.send(`🔍 Checking **@${usernameRaw}**…`).catch(() => null);
+
+    const result = await igMonitor.addAccount(message.guild.id, usernameRaw, client);
+
+    if (result.success) {
+      await checkMsg?.edit(`✅ **Connected successfully!** Channel <#${result.channel.id}> has been created for **@${result.profile.username}**.`).catch(() => null);
+    } else if (result.reason === 'already_exists') {
+      await checkMsg?.edit(`⚠️ **@${usernameRaw}** is already being monitored.`).catch(() => null);
+    } else {
+      await checkMsg?.edit(`❌ **Connection failed.** Please check the username and try again.\n> ${result.error || result.reason}`).catch(() => null);
+    }
+    return;
+  }
+
+  await message.reply(
+    '**Instagram Monitor commands** (admin only)\n' +
+    '`!ig monitor info` — list all monitored accounts\n' +
+    '`!add ig monitor` — add a new Instagram account to monitor'
+  ).catch(() => null);
 }
 
 async function handleMemberJoin(member) {
