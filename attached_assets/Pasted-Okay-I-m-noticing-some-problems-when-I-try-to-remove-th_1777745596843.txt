@@ -1,0 +1,114 @@
+Okay, I’m noticing some problems when I try to remove things from images. I mean, when I use the image remove command.
+It asks me to attach an image, and when I do that, it shows:
+👉 “Background removal failed: unsupported format.”
+This is happening every time with every image. I haven’t seen a single successful result so far.
+
+Another issue:
+At first, I didn’t understand the process. I was giving the command and then uploading the image, but nothing was happening.
+Later I realized:
+
+
+First, I need to give the command
+
+
+Then attach the image together with the command text
+
+
+Only then it works.
+Honestly, this is not a good experience.
+👉 So make it work in both ways:
+
+
+Attach image with the command (current way) ✅
+
+
+OR give command first, then upload image in the next message ✅
+
+
+If I upload an image after some other command, then it’s fine—just ignore it.
+
+More issues:
+During background removal, I uploaded an image where a car was in the background, but it couldn’t recognize it properly. It only detected the person.
+Then when I tried to remove the person:
+
+
+Instead of removing, it just blurred the area
+
+
+The image became blurry
+
+
+Nothing was actually removed properly
+
+
+You can clearly see it’s blurred, not removed.
+I’ve shared that image—check it.
+
+Now I tested another command: Image Upscaler
+I wanted to see how your upscaler performs.
+
+
+I uploaded an image with the command
+
+
+It showed: “Working, please wait”
+
+
+I waited
+
+
+Then suddenly:
+
+
+The message got deleted
+
+
+No result, no output
+
+
+I didn’t understand what happened.
+I tried again:
+
+
+Same process
+
+
+Again “Working, please wait”
+
+
+Then message disappears
+
+
+What is this? This doesn’t make sense.
+
+Now I tested the last command: Face Changer
+It says:
+👉 Attach two images:
+
+
+First = original image
+
+
+Second = face image
+
+
+So I:
+
+
+Gave the command
+
+
+Uploaded first image
+
+
+Then uploaded second image
+
+
+But it says:
+👉 “No face detected in second attachment”
+Even though I clearly uploaded a proper image.
+
+So now tell me, what should I do?
+From what I see, your system isn’t working properly yet. You need to improve and upgrade it.
+These things need to be properly programmed and handled carefully.
+I will send you attachments showing what I did and what worked or didn’t work.

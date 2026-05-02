@@ -1215,6 +1215,29 @@ function getImageAttachments(message) {
   );
 }
 
+// Waits up to 60 s for the user to send a message with at least `minCount`
+// image attachments.  Returns the attachment array or null on timeout.
+async function waitForImages(message, toolName, minCount = 1) {
+  const needStr = minCount > 1 ? `**${minCount} images** (in one message)` : 'your **image**';
+  const prompt  = await message.reply(
+    `📎 **${toolName}** — Please send ${needStr} now. Waiting 60 seconds…`
+  ).catch(() => null);
+
+  try {
+    const collected = await message.channel.awaitMessages({
+      filter: m => m.author.id === message.author.id && getImageAttachments(m).length >= minCount,
+      max: 1,
+      time: 60_000,
+      errors: ['time'],
+    });
+    if (prompt) await prompt.delete().catch(() => null);
+    return getImageAttachments(collected.first());
+  } catch {
+    if (prompt) await prompt.edit(`⏰ **${toolName}** — No image received. Cancelled.`).catch(() => null);
+    return null;
+  }
+}
+
 async function handleImageCommand(message) {
   const parts = message.content.trim().split(/\s+/);
   if (parts[0].toLowerCase() !== '!image') return false;
@@ -1258,19 +1281,20 @@ async function handleImageCommand(message) {
 
   // ── Background Removal ────────────────────────────────────────────────────
   if (sub === 'bg') {
-    if (atts.length === 0) {
-      await message.reply('Please attach an image to use the **Background Remover**.').catch(() => null);
-      return true;
+    let imageAtts = atts;
+    if (imageAtts.length === 0) {
+      imageAtts = await waitForImages(message, '🪄 Background Remover', 1);
+      if (!imageAtts) return true;
     }
     const status = await message.reply('🪄 **Background Remover** — Working, please wait…').catch(() => null);
     try {
-      const buf    = await downloadBuffer(atts[0].url);
+      const buf    = await downloadBuffer(imageAtts[0].url);
       const result = await imageEditor.removeBackground(buf);
       if (status) await status.delete().catch(() => null);
       await message.channel.send({
         content: `✅ <@${message.author.id}> — Background removed!`,
         files: [{ attachment: result, name: 'no_background.png' }],
-      }).catch(() => null);
+      });
     } catch (e) {
       console.error('[image-editor] bg error:', e);
       if (status) await status.delete().catch(() => null);
@@ -1281,21 +1305,22 @@ async function handleImageCommand(message) {
 
   // ── Upscaler ──────────────────────────────────────────────────────────────
   if (sub === 'upscale') {
-    if (atts.length === 0) {
-      await message.reply('Please attach an image to use the **Upscaler**.').catch(() => null);
-      return true;
+    let imageAtts = atts;
+    if (imageAtts.length === 0) {
+      imageAtts = await waitForImages(message, '🔍 Image Upscaler', 1);
+      if (!imageAtts) return true;
     }
     const scaleArg = parseInt(parts[2]);
     const scale    = [2, 4].includes(scaleArg) ? scaleArg : 4;
     const status   = await message.reply(`🔍 **Image Upscaler** — Working, please wait…`).catch(() => null);
     try {
-      const buf    = await downloadBuffer(atts[0].url);
-      const result = await imageEditor.upscaleImage(buf, scale);
+      const buf          = await downloadBuffer(imageAtts[0].url);
+      const { buf: out, ext } = await imageEditor.upscaleImage(buf, scale);
       if (status) await status.delete().catch(() => null);
       await message.channel.send({
         content: `✅ <@${message.author.id}> — Upscaled **${scale}×**!`,
-        files: [{ attachment: result, name: `upscaled_${scale}x.png` }],
-      }).catch(() => null);
+        files: [{ attachment: out, name: `upscaled_${scale}x.${ext}` }],
+      });
     } catch (e) {
       console.error('[image-editor] upscale error:', e);
       if (status) await status.delete().catch(() => null);
@@ -1306,14 +1331,15 @@ async function handleImageCommand(message) {
 
   // ── Object Removal ────────────────────────────────────────────────────────
   if (sub === 'remove') {
-    if (atts.length === 0) {
-      await message.reply('Please attach an image to use the **Object Remover**.').catch(() => null);
-      return true;
+    let imageAtts = atts;
+    if (imageAtts.length === 0) {
+      imageAtts = await waitForImages(message, '🧹 Object Remover', 1);
+      if (!imageAtts) return true;
     }
     const prompt = parts.slice(2).join(' ').trim().toLowerCase();
     const status = await message.reply('🧹 **Object Remover** — Working, please wait…').catch(() => null);
     try {
-      const buf     = await downloadBuffer(atts[0].url);
+      const buf     = await downloadBuffer(imageAtts[0].url);
       const objects = await imageEditor.detectObjects(buf);
 
       if (objects.length === 0) {
@@ -1325,7 +1351,13 @@ async function handleImageCommand(message) {
       let selected = [];
 
       if (prompt) {
-        selected = objects.filter(o => o.label.toLowerCase().includes(prompt));
+        // Match: any word from the prompt appears in the label, OR label appears in the prompt
+        // e.g. "the car" → words ["the","car"] → "car" matches label "car"
+        const words = prompt.replace(/[^\w\s]/g, '').split(/\s+/).filter(Boolean);
+        selected = objects.filter(o => {
+          const lbl = o.label.toLowerCase();
+          return words.some(w => lbl.includes(w) || w.includes(lbl));
+        });
         if (selected.length === 0) {
           const found = objects.map((o, i) => `**${i + 1}.** ${o.label} (${o.score}%)`).join('\n');
           if (status) await status.delete().catch(() => null);
@@ -1369,7 +1401,7 @@ async function handleImageCommand(message) {
       await message.channel.send({
         content: `✅ <@${message.author.id}> — Removed: **${labels}**`,
         files: [{ attachment: result, name: 'object_removed.png' }],
-      }).catch(() => null);
+      });
     } catch (e) {
       console.error('[image-editor] remove error:', e);
       if (status) await status.delete().catch(() => null);
@@ -1380,26 +1412,26 @@ async function handleImageCommand(message) {
 
   // ── Face Swap ─────────────────────────────────────────────────────────────
   if (sub === 'faceswap') {
-    if (atts.length < 2) {
-      await message.reply(
-        'Please attach **two images** in one message:\n' +
-        '• **First image** — original (face to be replaced)\n' +
-        '• **Second image** — the face to apply'
-      ).catch(() => null);
-      return true;
+    let imageAtts = atts;
+    if (imageAtts.length < 2) {
+      // Already have 1: ask for just the second; have 0: ask for both
+      const need = imageAtts.length === 1 ? 1 : 2;
+      const extra = await waitForImages(message, '🔄 Face Changer', need);
+      if (!extra) return true;
+      imageAtts = [...imageAtts, ...extra].slice(0, 2);
     }
     const status = await message.reply('🔄 **Face Changer** — Working, please wait…').catch(() => null);
     try {
       const [targetBuf, faceBuf] = await Promise.all([
-        downloadBuffer(atts[0].url),
-        downloadBuffer(atts[1].url),
+        downloadBuffer(imageAtts[0].url),
+        downloadBuffer(imageAtts[1].url),
       ]);
       const result = await imageEditor.swapFace(faceBuf, targetBuf);
       if (status) await status.delete().catch(() => null);
       await message.channel.send({
         content: `✅ <@${message.author.id}> — Face swapped!`,
         files: [{ attachment: result, name: 'face_swapped.png' }],
-      }).catch(() => null);
+      });
     } catch (e) {
       console.error('[image-editor] faceswap error:', e);
       if (status) await status.delete().catch(() => null);
