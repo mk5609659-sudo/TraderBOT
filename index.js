@@ -16,7 +16,8 @@ if (process.env.DISCORD_TOKEN) {
   config.token = process.env.DISCORD_TOKEN;
 }
 
-const igMonitor = require('./services/instagram_monitor');
+const igMonitor    = require('./services/instagram_monitor');
+const imageEditor  = require('./services/image_editor');
 const linkRegex = /(https?:\/\/[^\s]+)/i;
 
 const WELCOME_FILE = './welcome.json';
@@ -161,6 +162,8 @@ async function handleMessage(message) {
   if (content.startsWith('!') && message.guild) {
     const handled = await handleAdminCommand(message);
     if (handled) return;
+    const imageHandled = await handleImageCommand(message);
+    if (imageHandled) return;
   }
 
   if (isProtectedFromModeration(message)) {
@@ -1201,6 +1204,210 @@ function isAdmin(member) {
          member.permissions.has('ManageChannels');
 }
 
+async function downloadBuffer(url) {
+  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  return Buffer.from(response.data);
+}
+
+function getImageAttachments(message) {
+  return [...message.attachments.values()].filter(
+    a => a.contentType?.startsWith('image/') || /\.(jpe?g|png|webp|gif)$/i.test(a.url)
+  );
+}
+
+async function handleImageCommand(message) {
+  const parts = message.content.trim().split(/\s+/);
+  if (parts[0].toLowerCase() !== '!image') return false;
+
+  const sub  = parts[1]?.toLowerCase() || 'editor';
+  const atts = getImageAttachments(message);
+
+  // ── Menu ──────────────────────────────────────────────────────────────────
+  if (!parts[1] || sub === 'editor') {
+    const embed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle('🖼️ Image Editor — Available Tools')
+      .setDescription('Attach an image to any command below and the bot will process it instantly.\n_No external APIs — everything runs locally._')
+      .addFields(
+        {
+          name: '🪄  Background Remover',
+          value: '`!image bg` — automatically removes the image background with AI accuracy.\nNo prompt needed — just attach the image.',
+        },
+        {
+          name: '🧹  Object Remover',
+          value: '`!image remove [object]` — removes a specific object from the image.\n• With text: `!image remove person` → targets that object.\n• Without text → the bot detects all objects and shows a numbered list to pick from.',
+        },
+        {
+          name: '🔄  Face Changer',
+          value: '`!image faceswap` — attach **two images** in one message.\n• **First** = original image (face to replace).\n• **Second** = face to apply.',
+        },
+        {
+          name: '🔍  Image Upscaler',
+          value: '`!image upscale [2/4]` — upscales with Lanczos3 resampling + adaptive sharpening.\nDefault: **4×**  •  Max output: 4K',
+        }
+      )
+      .setFooter({ text: 'Available to all users • All processing is done locally' });
+    await message.reply({ embeds: [embed] }).catch(() => null);
+    return true;
+  }
+
+  // ── Background Removal ────────────────────────────────────────────────────
+  if (sub === 'bg') {
+    if (atts.length === 0) {
+      await message.reply('Please attach an image to use the **Background Remover**.').catch(() => null);
+      return true;
+    }
+    const status = await message.reply('⏳ Removing background… this may take a moment on first run (model loading).').catch(() => null);
+    try {
+      const buf    = await downloadBuffer(atts[0].url);
+      const result = await imageEditor.removeBackground(buf);
+      if (status) await status.delete().catch(() => null);
+      await message.channel.send({
+        content: `✅ <@${message.author.id}> — Background removed!`,
+        files: [{ attachment: result, name: 'no_background.png' }],
+      }).catch(() => null);
+    } catch (e) {
+      console.error('[image-editor] bg error:', e);
+      if (status) await status.delete().catch(() => null);
+      await message.reply(`❌ Background removal failed: ${e.message}`).catch(() => null);
+    }
+    return true;
+  }
+
+  // ── Upscaler ──────────────────────────────────────────────────────────────
+  if (sub === 'upscale') {
+    if (atts.length === 0) {
+      await message.reply('Please attach an image to use the **Upscaler**.').catch(() => null);
+      return true;
+    }
+    const scaleArg = parseInt(parts[2]);
+    const scale    = [2, 4].includes(scaleArg) ? scaleArg : 4;
+    const status   = await message.reply(`⏳ Upscaling image ${scale}×…`).catch(() => null);
+    try {
+      const buf    = await downloadBuffer(atts[0].url);
+      const result = await imageEditor.upscaleImage(buf, scale);
+      if (status) await status.delete().catch(() => null);
+      await message.channel.send({
+        content: `✅ <@${message.author.id}> — Upscaled **${scale}×**!`,
+        files: [{ attachment: result, name: `upscaled_${scale}x.png` }],
+      }).catch(() => null);
+    } catch (e) {
+      console.error('[image-editor] upscale error:', e);
+      if (status) await status.delete().catch(() => null);
+      await message.reply(`❌ Upscale failed: ${e.message}`).catch(() => null);
+    }
+    return true;
+  }
+
+  // ── Object Removal ────────────────────────────────────────────────────────
+  if (sub === 'remove') {
+    if (atts.length === 0) {
+      await message.reply('Please attach an image to use the **Object Remover**.').catch(() => null);
+      return true;
+    }
+    const prompt = parts.slice(2).join(' ').trim().toLowerCase();
+    const status = await message.reply('🔍 Analyzing image… detecting objects.').catch(() => null);
+    try {
+      const buf     = await downloadBuffer(atts[0].url);
+      const objects = await imageEditor.detectObjects(buf);
+
+      if (objects.length === 0) {
+        if (status) await status.delete().catch(() => null);
+        await message.reply('❌ No recognisable objects were detected in this image.').catch(() => null);
+        return true;
+      }
+
+      let selected = [];
+
+      if (prompt) {
+        selected = objects.filter(o => o.label.toLowerCase().includes(prompt));
+        if (selected.length === 0) {
+          const found = objects.map((o, i) => `**${i + 1}.** ${o.label} (${o.score}%)`).join('\n');
+          if (status) await status.delete().catch(() => null);
+          await message.reply(`❌ No object matching "**${prompt}**" was found.\n\n**Detected objects:**\n${found}`).catch(() => null);
+          return true;
+        }
+      } else {
+        const list = objects.map((o, i) => `**${i + 1}.** ${o.label} — ${o.score}% confidence`).join('\n');
+        if (status) await status.edit(
+          `📋 **Detected ${objects.length} object(s):**\n${list}\n\n` +
+          `Reply with the number(s) to remove (e.g. \`1\` or \`1 3\`). Waiting 30 s…`
+        ).catch(() => null);
+
+        try {
+          const collected = await message.channel.awaitMessages({
+            filter: m => m.author.id === message.author.id,
+            max: 1,
+            time: 30_000,
+            errors: ['time'],
+          });
+          const reply = collected.first();
+          await reply.delete().catch(() => null);
+          const nums = reply.content.trim().split(/\s+/)
+            .map(n => parseInt(n))
+            .filter(n => !isNaN(n) && n >= 1 && n <= objects.length);
+          if (nums.length === 0) {
+            if (status) await status.edit('❌ Invalid selection. Object removal cancelled.').catch(() => null);
+            return true;
+          }
+          selected = nums.map(n => objects[n - 1]);
+        } catch {
+          if (status) await status.edit('⏰ No response received. Object removal cancelled.').catch(() => null);
+          return true;
+        }
+      }
+
+      if (status) await status.edit(`⏳ Removing **${selected.length}** object(s)…`).catch(() => null);
+      const result = await imageEditor.removeObjects(buf, selected.map(o => o.bbox));
+      if (status) await status.delete().catch(() => null);
+      const labels = selected.map(o => o.label).join(', ');
+      await message.channel.send({
+        content: `✅ <@${message.author.id}> — Removed: **${labels}**`,
+        files: [{ attachment: result, name: 'object_removed.png' }],
+      }).catch(() => null);
+    } catch (e) {
+      console.error('[image-editor] remove error:', e);
+      if (status) await status.delete().catch(() => null);
+      await message.reply(`❌ Object removal failed: ${e.message}`).catch(() => null);
+    }
+    return true;
+  }
+
+  // ── Face Swap ─────────────────────────────────────────────────────────────
+  if (sub === 'faceswap') {
+    if (atts.length < 2) {
+      await message.reply(
+        'Please attach **two images** in one message:\n' +
+        '• **First image** — original (face to be replaced)\n' +
+        '• **Second image** — the face to apply'
+      ).catch(() => null);
+      return true;
+    }
+    const status = await message.reply('⏳ Detecting faces and swapping… this may take a moment on first run.').catch(() => null);
+    try {
+      const [targetBuf, faceBuf] = await Promise.all([
+        downloadBuffer(atts[0].url),
+        downloadBuffer(atts[1].url),
+      ]);
+      const result = await imageEditor.swapFace(faceBuf, targetBuf);
+      if (status) await status.delete().catch(() => null);
+      await message.channel.send({
+        content: `✅ <@${message.author.id}> — Face swapped!`,
+        files: [{ attachment: result, name: 'face_swapped.png' }],
+      }).catch(() => null);
+    } catch (e) {
+      console.error('[image-editor] faceswap error:', e);
+      if (status) await status.delete().catch(() => null);
+      await message.reply(`❌ Face swap failed: ${e.message}`).catch(() => null);
+    }
+    return true;
+  }
+
+  // ── Unknown sub-command ───────────────────────────────────────────────────
+  await message.reply('Unknown image command. Use `!image editor` to see all available tools.').catch(() => null);
+  return true;
+}
+
 async function handleAdminCommand(message) {
   const parts = message.content.trim().split(/\s+/);
   const cmd = parts[0].toLowerCase();
@@ -1240,6 +1447,17 @@ async function handleAdminCommand(message) {
             '`!disablewelcome` — turn welcome messages off',
             '`!testwelcome` — preview the welcome message using yourself',
             '`!welcomeinfo` — show current welcome settings',
+          ].join('\n'),
+        },
+        {
+          name: '🖼️ Image Editor',
+          value: [
+            '`!image editor` — show all image editing tools',
+            '`!image bg` — remove background (attach image)',
+            '`!image upscale [2/4]` — upscale image to 2× or 4× (attach image)',
+            '`!image remove [object]` — remove an object (attach image, text optional)',
+            '`!image faceswap` — swap faces between two images (attach 2 images)',
+            '_Available to all users, no external APIs used._',
           ].join('\n'),
         },
         {
