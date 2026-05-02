@@ -1219,6 +1219,11 @@ async function handleImageCommand(message) {
   const parts = message.content.trim().split(/\s+/);
   if (parts[0].toLowerCase() !== '!image') return false;
 
+  if (!isAdmin(message.member)) {
+    await message.reply('You need Administrator or Manage Server permission to use this command.').catch(() => null);
+    return true;
+  }
+
   const sub  = parts[1]?.toLowerCase() || 'editor';
   const atts = getImageAttachments(message);
 
@@ -1246,7 +1251,7 @@ async function handleImageCommand(message) {
           value: '`!image upscale [2/4]` — upscales with Lanczos3 resampling + adaptive sharpening.\nDefault: **4×**  •  Max output: 4K',
         }
       )
-      .setFooter({ text: 'Available to all users • All processing is done locally' });
+      .setFooter({ text: 'Admin only • All processing is done locally' });
     await message.reply({ embeds: [embed] }).catch(() => null);
     return true;
   }
@@ -1457,7 +1462,7 @@ async function handleAdminCommand(message) {
             '`!image upscale [2/4]` — upscale image to 2× or 4× (attach image)',
             '`!image remove [object]` — remove an object (attach image, text optional)',
             '`!image faceswap` — swap faces between two images (attach 2 images)',
-            '_Available to all users, no external APIs used._',
+            '_Admin only • No external APIs used._',
           ].join('\n'),
         },
         {
