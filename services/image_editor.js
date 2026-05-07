@@ -9,7 +9,7 @@ let _blazeModel = null;
 async function getTf() {
   if (!_tf) {
     console.log('[image-editor] loading TensorFlow.js...');
-    _tf = require('@tensorflow/tfjs');
+    _tf = require('@tensorflow/tfjs-node');
     console.log('[image-editor] TensorFlow.js ready.');
   }
   return _tf;
